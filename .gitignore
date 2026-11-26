@@ -11,6 +11,7 @@ target/
 # Environment & Secrets
 .env
 .env.*
+.env.staging
 !.env.example
 certs/
 *.pem
