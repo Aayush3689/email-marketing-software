@@ -957,7 +957,7 @@ export class PgDomainStore implements DomainStore {
 
   async listDomainAuditEvents(orgId: string, domainId: string): Promise<DomainAuditEvent[]> {
     const res = await this.pool.query(
-      `SELECT id::text, COALESCE(u.email::text, a.actor_user_id::text, 'system') AS actor,
+      `SELECT a.id::text, COALESCE(u.email::text, a.actor_user_id::text, 'system') AS actor,
               a.actor_ip::text, a.action, a.before_state, a.after_state, a.created_at
          FROM audit_logs a
          LEFT JOIN users u ON u.id = a.actor_user_id
