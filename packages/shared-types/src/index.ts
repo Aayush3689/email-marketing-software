@@ -432,6 +432,8 @@ export interface DnsRecordEvaluation {
   checkedAt: string | null;
 }
 
+export type DkimSigningPolicy = 'required' | 'optional';
+
 export interface DkimKeySummary {
   id: string;
   domainId: string;
@@ -439,6 +441,7 @@ export interface DkimKeySummary {
   algorithm: 'rsa2048' | 'ed25519';
   dnsRecordName: string;
   publicKeyDnsTxt: string;
+  keyEncryptionVersion?: number;
   status: 'active' | 'retiring' | 'revoked';
   dnsVerified: boolean;
   mtaLoaded: boolean;

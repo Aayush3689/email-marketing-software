@@ -11,8 +11,8 @@ use anyhow::Result;
 use bounce_handler::FeedbackClassification;
 use delivery_engine::{AttemptRecord, DeliveryStateStore, RecipientDeliveryState};
 use dkim::{
-    generate_domain_dkim_key, DkimAlgorithm, DkimKeyRing, DkimKeyStatus, KeyEncryptionKey,
-    StoredDkimKey,
+    generate_domain_dkim_key_versioned, DkimAlgorithm, DkimKeyRing, DkimKeyStatus,
+    KeyEncryptionKeyRing, StoredDkimKey,
 };
 use smtp_inbound::processor::{ExpandedRouting, FeedbackStore, InboundRouter, MailboxTarget};
 use smtp_inbound::{CredentialRecord, CredentialStore, DomainDirectory, RecipientRouting};
@@ -760,12 +760,21 @@ async fn resolve_feedback_target(
 }
 
 /// Reloads all active DKIM keys from PostgreSQL into `keyring` atomically.
+/// Reloads all active DKIM keys for non-suspended domains from PostgreSQL into `keyring`.
+///
+/// Only replaces `keyring` contents when the PostgreSQL query succeeds so transient DB errors
+/// never wipe healthy in-memory keys.
 ///
 /// # Errors
 /// Returns an error if querying PostgreSQL fails.
 pub async fn reload_dkim_keys_from_db(pool: &PgPool, keyring: &DkimKeyRing) -> Result<usize> {
     let rows = sqlx::query(
-        r"SELECT d.domain_name::text AS domain_name, k.selector, k.algorithm, k.public_key_dns_txt, k.encrypted_private_key
+        r"SELECT d.domain_name::text AS domain_name,
+                 k.selector,
+                 k.algorithm,
+                 k.public_key_dns_txt,
+                 k.encrypted_private_key,
+                 k.key_encryption_version
             FROM dkim_keys k
             JOIN domains d ON d.id = k.domain_id
            WHERE k.status = 'active' AND d.is_suspended = FALSE",
@@ -780,12 +789,13 @@ pub async fn reload_dkim_keys_from_db(pool: &PgPool, keyring: &DkimKeyRing) -> R
         let algo_str: String = row.try_get("algorithm").unwrap_or_default();
         let pub_txt: String = row.try_get("public_key_dns_txt").unwrap_or_default();
         let enc: Vec<u8> = row.try_get("encrypted_private_key").unwrap_or_default();
+        let kek_ver: i32 = row.try_get("key_encryption_version").unwrap_or(1);
         let algorithm = if algo_str.eq_ignore_ascii_case("ed25519") {
             DkimAlgorithm::Ed25519
         } else {
             DkimAlgorithm::Rsa2048
         };
-        if !domain.is_empty() && !enc.is_empty() {
+        if !domain.is_empty() && !sel.is_empty() && !enc.is_empty() {
             loaded.push(StoredDkimKey {
                 dns_record_name: format!("{sel}._domainkey.{domain}"),
                 domain: domain.to_ascii_lowercase(),
@@ -793,6 +803,7 @@ pub async fn reload_dkim_keys_from_db(pool: &PgPool, keyring: &DkimKeyRing) -> R
                 algorithm,
                 public_key_dns_txt: pub_txt,
                 encrypted_private_key: enc,
+                key_encryption_version: kek_ver.max(1),
                 status: DkimKeyStatus::Active,
             });
         }
@@ -802,12 +813,13 @@ pub async fn reload_dkim_keys_from_db(pool: &PgPool, keyring: &DkimKeyRing) -> R
     Ok(count)
 }
 
-/// Loads encrypted DKIM keys from PostgreSQL `dkim_keys` and persists an initial RSA-2048 key for
-/// `primary_domain` if none exists yet so restarts never invalidate published DNS records.
+/// Loads encrypted DKIM keys from PostgreSQL `dkim_keys` and optionally seeds an initial RSA-2048
+/// key for `primary_domain` only if PostgreSQL has no active key yet, then reloads from DB so DB
+/// stays the single authoritative source of truth.
 pub async fn load_or_seed_dkim_keys(
     pg_pool: Option<&PgPool>,
     keyring: &DkimKeyRing,
-    kek: &KeyEncryptionKey,
+    kek_ring: &KeyEncryptionKeyRing,
     primary_domain: Option<&str>,
     selector: &str,
     auto_generate: bool,
@@ -822,7 +834,12 @@ pub async fn load_or_seed_dkim_keys(
         if let Some(domain) = primary_domain {
             let norm = domain.trim().to_ascii_lowercase();
             if keyring.active_key(&norm).is_none() {
-                match generate_domain_dkim_key(&norm, selector, DkimAlgorithm::Rsa2048, kek) {
+                match generate_domain_dkim_key_versioned(
+                    &norm,
+                    selector,
+                    DkimAlgorithm::Rsa2048,
+                    kek_ring,
+                ) {
                     Ok(key) => {
                         if let Some(pool) = pg_pool {
                             if let Ok(Some(dom_row)) = sqlx::query(
@@ -834,28 +851,30 @@ pub async fn load_or_seed_dkim_keys(
                             {
                                 let dom_id: Uuid = dom_row.try_get("id").unwrap_or_default();
                                 if let Err(err) = sqlx::query(
-                                    r"INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, status)
-                                      VALUES ($1, $2, $3, 'rsa2048', $4, $5, 'active')
-                                      ON CONFLICT (domain_id, selector) DO NOTHING",
+                                    r"INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, key_encryption_version, status)
+                                      VALUES ($1, $2, $3, 'rsa2048', $4, $5, $6, 'active')
+                                      ON CONFLICT DO NOTHING",
                                 )
                                 .bind(Uuid::now_v7())
                                 .bind(dom_id)
                                 .bind(&key.selector)
                                 .bind(&key.public_key_dns_txt)
                                 .bind(&key.encrypted_private_key)
+                                .bind(key.key_encryption_version)
                                 .execute(pool)
                                 .await
                                 {
                                     warn!(error = %err, "Failed persisting generated DKIM key to Postgres");
                                 }
                             }
+                            // Always re-read from PostgreSQL so local cache can never diverge from concurrent inserts
+                            if let Err(err) = reload_dkim_keys_from_db(pool, keyring).await {
+                                warn!(error = %err, "Failed reloading DKIM keys after bootstrap insert");
+                            }
+                        } else {
+                            // Standalone no-Postgres test/dev mode
+                            keyring.install_active_key(key);
                         }
-                        info!(
-                            dns_record_name = %key.dns_record_name,
-                            dns_txt_value = %key.public_key_dns_txt,
-                            "Active DKIM key ready; publish this TXT record in DNS"
-                        );
-                        keyring.install_active_key(key);
                     }
                     Err(err) => warn!(error = %err, "Failed generating primary domain DKIM key"),
                 }

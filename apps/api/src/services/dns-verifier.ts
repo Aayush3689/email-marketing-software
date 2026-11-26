@@ -648,13 +648,45 @@ export async function runFullDomainDiagnostics(
 
   for (const { key, txt } of dkimLookups) {
     const expectedNorm = extractNormalizedDkimPublicKeyBase64(key.publicKeyDnsTxt);
-    const matched = txt.records.some((r) => {
-      const detNorm = extractNormalizedDkimPublicKeyBase64(r);
-      if (expectedNorm.canonicalPkcs1Base64 && detNorm.canonicalPkcs1Base64) {
-        return expectedNorm.canonicalPkcs1Base64 === detNorm.canonicalPkcs1Base64;
+    const parsedRecords = txt.records.map((raw) => ({
+      raw,
+      parsed: extractNormalizedDkimPublicKeyBase64(raw),
+    }));
+    const validParsed = parsedRecords.filter((p) => p.parsed.validSyntax && p.parsed.canonicalPkcs1Base64);
+    const distinctKeys = new Set(validParsed.map((p) => p.parsed.canonicalPkcs1Base64!));
+
+    let matched = false;
+    let errorDetail = txt.error;
+    let remediation = '';
+
+    if (txt.error) {
+      const isTimeout = txt.error.toLowerCase().includes('timed out');
+      errorDetail = isTimeout ? `DNS lookup timeout: ${txt.error}` : `DNS resolver failure: ${txt.error}`;
+      remediation = isTimeout
+        ? `DNS query timed out for ${key.dnsRecordName}. Retry verification or inspect authoritative nameservers.`
+        : `DNS resolver error checking ${key.dnsRecordName}: ${txt.error}`;
+    } else if (txt.records.length === 0) {
+      remediation = `Record missing: publish TXT record at ${key.dnsRecordName} with value "${key.publicKeyDnsTxt}" (no spaces inside p=).`;
+    } else if (validParsed.length === 0) {
+      remediation = `Invalid DKIM TXT format at ${key.dnsRecordName}: found TXT record(s) without a valid v=DKIM1; p= RSA/Ed25519 public key.`;
+    } else if (distinctKeys.size > 1 || (validParsed.length > 0 && validParsed.length < parsedRecords.length)) {
+      remediation = `Multiple conflicting DKIM TXT records found at ${key.dnsRecordName}. Remove stale records so only one matching key remains.`;
+    } else {
+      const onlyKey = validParsed[0]!;
+      const detectedCanonical = onlyKey.parsed.canonicalPkcs1Base64;
+      if (expectedNorm.canonicalPkcs1Base64 && detectedCanonical === expectedNorm.canonicalPkcs1Base64) {
+        matched = true;
+      } else if (
+        txt.records.length === 1 &&
+        txt.records[0]!.replace(/\s+/g, '') === key.publicKeyDnsTxt.replace(/\s+/g, '')
+      ) {
+        matched = true;
+      } else {
+        const expFp = expectedNorm.sha256Fingerprint ? expectedNorm.sha256Fingerprint.slice(0, 16) : 'unknown';
+        const detFp = onlyKey.parsed.sha256Fingerprint ? onlyKey.parsed.sha256Fingerprint.slice(0, 16) : 'unknown';
+        remediation = `Wrong public key at ${key.dnsRecordName}: DNS key sha256:${detFp}... does not match active DB key sha256:${expFp}.... Update DNS TXT to match the active key.`;
       }
-      return r.replace(/\s+/g, '') === key.publicKeyDnsTxt.replace(/\s+/g, '');
-    });
+    }
 
     if (matched) verifiedDkimSelectors.push(key.selector);
 
@@ -672,10 +704,8 @@ export async function runFullDomainDiagnostics(
       required: key.status === 'active' && input.sendingEnabled,
       propagationStatus: txt.records.length > 0 ? 'propagated' : txt.error ? 'error' : 'not_found',
       resolver: 'system',
-      error: txt.error,
-      remediation: matched
-        ? ''
-        : `Publish TXT record at ${key.dnsRecordName} matching the ${key.status} key (no spaces inside p=).`,
+      error: errorDetail,
+      remediation,
       checkedAt,
     });
   }

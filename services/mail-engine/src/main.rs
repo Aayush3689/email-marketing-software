@@ -17,7 +17,7 @@ use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use auth_verification::InboundAuthVerifier;
 use delivery_engine::{DeliveryEngine, DeliveryEngineConfig, DeliveryPoolKind};
-use dkim::{DkimKeyRing, KeyEncryptionKey};
+use dkim::{DkimKeyRing, KeyEncryptionKeyRing};
 use dns_resolver::{DnsCacheConfig, HickoryDnsResolver};
 use mailbox_client::{DovecotLmtpClient, LmtpClientConfig};
 use message_storage::{LocalSpoolStore, S3Config, S3MessageStore, SpoolStorage};
@@ -81,7 +81,7 @@ struct EngineConfig {
     database_url: Option<String>,
     rabbitmq_url: Option<String>,
     dkim_selector: String,
-    dkim_kek_hex: String,
+    is_production: bool,
     dkim_auto_generate: bool,
     smtp_auth_user: Option<String>,
     smtp_auth_pass: Option<String>,
@@ -95,20 +95,13 @@ impl EngineConfig {
             .map_or_else(|| "mail.localhost".to_string(), |d| format!("mx1.{d}"));
         let server_domain = env_opt("SMTP_SERVER_DOMAIN").unwrap_or_else(|| default_domain.clone());
         let helo_domain = env_opt("MAIL_HELO_DOMAIN").unwrap_or_else(|| server_domain.clone());
-        let dkim_kek_hex =
-            env_opt("DKIM_KEK_HEX").unwrap_or_else(|| DEFAULT_DEV_DKIM_KEK_HEX.to_string());
         let control_token = env_opt("MAIL_ENGINE_CONTROL_TOKEN");
 
         let is_prod = env_opt("NODE_ENV").is_some_and(|v| v.eq_ignore_ascii_case("production"));
-        if is_prod {
-            if dkim_kek_hex == DEFAULT_DEV_DKIM_KEK_HEX {
-                anyhow::bail!(
-                    "DKIM_KEK_HEX must not use the default development key in production"
-                );
-            }
-            if control_token.is_none() {
-                anyhow::bail!("MAIL_ENGINE_CONTROL_TOKEN must be set in production");
-            }
+        // Validate versioned DKIM KEK ring early on startup without storing raw hex secrets
+        let _ = KeyEncryptionKeyRing::from_env_vars(is_prod, DEFAULT_DEV_DKIM_KEK_HEX)?;
+        if is_prod && control_token.is_none() {
+            anyhow::bail!("MAIL_ENGINE_CONTROL_TOKEN must be set in production");
         }
 
         Ok(Self {
@@ -142,7 +135,7 @@ impl EngineConfig {
             database_url: env_opt("DATABASE_URL"),
             rabbitmq_url: env_opt("RABBITMQ_URL"),
             dkim_selector: env_opt("DKIM_SELECTOR").unwrap_or_else(|| "mp1".to_string()),
-            dkim_kek_hex,
+            is_production: is_prod,
             dkim_auto_generate: env_opt("DKIM_AUTO_GENERATE")
                 .is_none_or(|v| v != "false" && v != "0"),
             smtp_auth_user: env_opt("SMTP_AUTH_USERNAME"),
@@ -184,7 +177,7 @@ async fn main() -> Result<()> {
     let raw_storage = Arc::new(build_spool_storage(&config).await?);
     let (pg_pool, rmq_client) = connect_infra(&config).await?;
     let (keyring, signing_storage) =
-        initialize_dkim(&config, &raw_storage, pg_pool.as_ref()).await?;
+        initialize_dkim(&config, &raw_storage, pg_pool.as_ref(), &metrics).await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let draining = Arc::new(AtomicBool::new(false));
@@ -198,6 +191,7 @@ async fn main() -> Result<()> {
         Arc::clone(&metrics),
         Arc::clone(&draining),
         Arc::clone(&keyring),
+        Arc::clone(&signing_storage),
         pg_pool.clone(),
         shutdown_rx.clone(),
     )));
@@ -598,12 +592,14 @@ async fn spawn_submission_listeners(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_control_and_metrics(
     listener: TcpListener,
     config: EngineConfig,
     metrics: Arc<MetricsRegistry>,
     draining: Arc<AtomicBool>,
     keyring: Arc<DkimKeyRing>,
+    signing_storage: Arc<DkimSigningStore<SpoolStorage>>,
     pg_pool: Option<sqlx::PgPool>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -616,11 +612,12 @@ async fn serve_control_and_metrics(
                     let m = Arc::clone(&metrics);
                     let d = Arc::clone(&draining);
                     let kr = Arc::clone(&keyring);
+                    let ss = Arc::clone(&signing_storage);
                     let pool = pg_pool.clone();
                     tokio::spawn(async move {
                         let _ = timeout(
                             Duration::from_secs(5),
-                            handle_control_connection(stream, &cfg, &m, &d, &kr, pool.as_ref()),
+                            handle_control_connection(stream, &cfg, &m, &d, &kr, &ss, pool.as_ref()),
                         )
                         .await;
                     });
@@ -642,15 +639,17 @@ async fn handle_control_connection(
     metrics: &MetricsRegistry,
     draining: &AtomicBool,
     keyring: &DkimKeyRing,
+    signing_storage: &DkimSigningStore<SpoolStorage>,
     pg_pool: Option<&sqlx::PgPool>,
 ) {
+    let is_loopback = stream.peer_addr().is_ok_and(|a| a.ip().is_loopback());
     let mut buf = [0_u8; 4096];
     let Ok(n) = stream.read(&mut buf).await else {
         return;
     };
     let req = String::from_utf8_lossy(&buf[..n]);
     let first_line = req.lines().next().unwrap_or("");
-    let authorized = is_bearer_authorized(&req, config.control_token.as_deref());
+    let authorized = is_bearer_authorized(&req, config.control_token.as_deref(), is_loopback);
 
     let (status_line, content_type, body) = if first_line.starts_with("POST /control/drain") {
         if authorized {
@@ -684,8 +683,16 @@ async fn handle_control_connection(
                 "{\"error\":\"unauthorized\"}".to_string(),
             )
         }
-    } else if let Some(resp) =
-        handle_dkim_control_request(first_line, authorized, config, keyring, pg_pool).await
+    } else if let Some(resp) = handle_dkim_control_request(
+        first_line,
+        authorized,
+        config,
+        metrics,
+        keyring,
+        signing_storage,
+        pg_pool,
+    )
+    .await
     {
         resp
     } else if first_line.starts_with("GET /status") || first_line.starts_with("GET /healthz") {
@@ -719,9 +726,10 @@ async fn handle_control_connection(
     let _ = stream.shutdown().await;
 }
 
-fn is_bearer_authorized(req: &str, expected_token: Option<&str>) -> bool {
+fn is_bearer_authorized(req: &str, expected_token: Option<&str>, is_loopback: bool) -> bool {
     let Some(expected) = expected_token else {
-        return true;
+        // Without a configured control token, restrict control routes to loopback callers only.
+        return is_loopback;
     };
     for line in req.lines() {
         let Some((name, val)) = line.split_once(':') else {
@@ -751,13 +759,17 @@ async fn initialize_dkim<S>(
     config: &EngineConfig,
     raw_storage: &Arc<S>,
     pg_pool: Option<&sqlx::PgPool>,
+    metrics: &Arc<MetricsRegistry>,
 ) -> Result<(Arc<DkimKeyRing>, Arc<DkimSigningStore<S>>)> {
-    let kek = Arc::new(KeyEncryptionKey::from_hex(&config.dkim_kek_hex)?);
+    let kek_ring = Arc::new(KeyEncryptionKeyRing::from_env_vars(
+        config.is_production,
+        DEFAULT_DEV_DKIM_KEK_HEX,
+    )?);
     let keyring = Arc::new(DkimKeyRing::default());
     load_or_seed_dkim_keys(
         pg_pool,
         &keyring,
-        &kek,
+        &kek_ring,
         config.primary_domain.as_deref(),
         &config.dkim_selector,
         config.dkim_auto_generate,
@@ -766,17 +778,20 @@ async fn initialize_dkim<S>(
     let signing_storage = Arc::new(DkimSigningStore::new(
         Arc::clone(raw_storage),
         Arc::clone(&keyring),
-        Arc::clone(&kek),
+        Arc::clone(&kek_ring),
         pg_pool.cloned(),
+        Arc::clone(metrics),
     ));
     Ok((keyring, signing_storage))
 }
 
-async fn handle_dkim_control_request(
+async fn handle_dkim_control_request<S>(
     first_line: &str,
     authorized: bool,
     config: &EngineConfig,
+    metrics: &MetricsRegistry,
     keyring: &DkimKeyRing,
+    signing_storage: &DkimSigningStore<S>,
     pg_pool: Option<&sqlx::PgPool>,
 ) -> Option<(&'static str, &'static str, String)> {
     if first_line.starts_with("POST /control/dkim/reload") {
@@ -787,9 +802,11 @@ async fn handle_dkim_control_request(
                 "{\"error\":\"unauthorized\"}".to_string(),
             ));
         }
+        signing_storage.invalidate_policy_cache();
         if let Some(pool) = pg_pool {
             return Some(match reload_dkim_keys_from_db(pool, keyring).await {
                 Ok(count) => {
+                    metrics.record_dkim_reload("success");
                     let selectors = keyring.active_selectors_by_domain();
                     let json = serde_json::json!({
                         "reloaded": count,
@@ -799,13 +816,17 @@ async fn handle_dkim_control_request(
                     info!(reloaded = count, "Reloaded DKIM keys from PostgreSQL");
                     ("200 OK", "application/json", json)
                 }
-                Err(err) => (
-                    "500 Internal Server Error",
-                    "application/json",
-                    serde_json::json!({ "error": err.to_string() }).to_string(),
-                ),
+                Err(err) => {
+                    metrics.record_dkim_reload("failure");
+                    (
+                        "500 Internal Server Error",
+                        "application/json",
+                        serde_json::json!({ "error": err.to_string() }).to_string(),
+                    )
+                }
             });
         }
+        metrics.record_dkim_reload("success");
         return Some((
             "200 OK",
             "application/json",

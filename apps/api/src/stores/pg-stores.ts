@@ -53,7 +53,13 @@ import type {
   WebhookEndpointRecord,
   WebhookStore,
 } from '../routes/webhooks.js';
-import { generateDomainDkimKeyPair } from '../services/dkim-service.js';
+import {
+  derivePublicKeyDnsTxtFromEncrypted,
+  extractNormalizedDkimPublicKeyBase64,
+  generateDomainDkimKeyPair,
+  reencryptDkimPrivateKey,
+  resolveDkimKekRing,
+} from '../services/dkim-service.js';
 import { diffDnsSnapshots, type FullDomainDnsDiagnostics } from '../services/dns-verifier.js';
 import { uuidv7 } from '../utils/uuidv7.js';
 
@@ -371,6 +377,7 @@ export class PgDomainStore implements DomainStore {
     d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
     d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason,
     COALESCE((SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' ORDER BY k.created_at DESC LIMIT 1), d.active_dkim_selector, 'mp1') AS active_selector,
+    d.dkim_policy,
     d.custom_return_path_domain::text, d.custom_tracking_domain::text, d.default_sender_local_part,
     d.dmarc_policy, d.dmarc_rua, d.dmarc_ruf, d.dmarc_pct, d.dmarc_aspf, d.dmarc_adkim,
     d.daily_send_limit, d.mta_sts_mode, d.mta_sts_max_age, d.tls_rpt_rua,
@@ -392,6 +399,7 @@ export class PgDomainStore implements DomainStore {
       isSuspended: Boolean(r.is_suspended),
       suspensionReason: (r.suspension_reason as string | null) ?? null,
       activeDkimSelector: (r.active_selector as string | null) ?? 'mp1',
+      dkimPolicy: r.dkim_policy === 'optional' ? 'optional' : 'required',
       customReturnPathDomain: (r.custom_return_path_domain as string | null)?.toLowerCase() ?? null,
       customTrackingDomain: (r.custom_tracking_domain as string | null)?.toLowerCase() ?? null,
       defaultSenderLocalPart: (r.default_sender_local_part as string | null) ?? null,
@@ -457,23 +465,45 @@ export class PgDomainStore implements DomainStore {
     const normalized = input.domainName.trim().toLowerCase();
     const token = `mp-verify-${randomBytes(12).toString('hex')}`;
     const id = uuidv7();
-    const defaultSel = (process.env.DKIM_SELECTOR || 'mp1').trim().toLowerCase();
+    const defaultSel = (process.env.DKIM_SELECTOR || 'mp1').trim().toLowerCase() || 'mp1';
+    const generated = generateDomainDkimKeyPair(normalized, defaultSel, 'rsa2048');
+    const keyId = uuidv7();
+
+    const client = await this.pool.connect();
     try {
-      await this.pool.query(
-        `INSERT INTO domains (id, organization_id, domain_name, verification_token, sending_enabled, hosting_enabled, active_dkim_selector, dmarc_rua)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO domains (id, organization_id, domain_name, verification_token, sending_enabled, hosting_enabled, active_dkim_selector, dmarc_rua, dkim_policy)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'required')`,
         [id, input.organizationId, normalized, token, input.sendingEnabled, input.hostingEnabled, defaultSel, `mailto:dmarc@${normalized}`]
       );
-      await this.ensureInitialDkimKey(id, normalized, defaultSel);
-      const created = await this.getDomain(input.organizationId, id);
-      if (!created) throw new Error('Failed reading newly created domain');
-      return created;
+      await client.query(
+        `INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, key_encryption_version, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')`,
+        [
+          keyId,
+          id,
+          generated.selector,
+          generated.algorithm,
+          generated.publicKeyDnsTxt,
+          generated.encryptedPrivateKey,
+          generated.keyEncryptionVersion,
+        ]
+      );
+      await client.query('COMMIT');
     } catch (err) {
+      await client.query('ROLLBACK');
       if ((err as { code?: string }).code === '23505') {
         throw new AppError(409, 'DOMAIN_EXISTS', `Domain ${normalized} is already registered`);
       }
       throw err;
+    } finally {
+      client.release();
     }
+
+    const created = await this.getDomain(input.organizationId, id);
+    if (!created) throw new Error('Failed reading newly created domain');
+    return created;
   }
 
   async getDomain(organizationId: string, domainId: string): Promise<DomainRecord | null> {
@@ -524,6 +554,7 @@ export class PgDomainStore implements DomainStore {
     };
     if (patch.sendingEnabled !== undefined) addField('sending_enabled', patch.sendingEnabled);
     if (patch.hostingEnabled !== undefined) addField('hosting_enabled', patch.hostingEnabled);
+    if (patch.dkimPolicy !== undefined) addField('dkim_policy', patch.dkimPolicy);
     if (patch.defaultSenderLocalPart !== undefined) addField('default_sender_local_part', patch.defaultSenderLocalPart || null);
     if (patch.customReturnPathDomain !== undefined) addField('custom_return_path_domain', patch.customReturnPathDomain);
     if (patch.customTrackingDomain !== undefined) addField('custom_tracking_domain', patch.customTrackingDomain);
@@ -548,15 +579,16 @@ export class PgDomainStore implements DomainStore {
     return this.getDomain(organizationId, domainId);
   }
 
-  async listDkimKeys(domainId: string): Promise<StoredDkimKeyRecord[]> {
+  async listDkimKeys(domainId: string, organizationId?: string): Promise<StoredDkimKeyRecord[]> {
     const res = await this.pool.query(
       `SELECT k.id::text, k.domain_id::text, d.domain_name::text, k.selector, k.algorithm,
-              k.public_key_dns_txt, k.status, k.rotated_at, k.created_at
+              k.public_key_dns_txt, k.key_encryption_version, k.status, k.rotated_at, k.created_at
          FROM dkim_keys k
          JOIN domains d ON d.id = k.domain_id
         WHERE k.domain_id = $1
+          ${organizationId ? 'AND d.organization_id = $2' : ''}
         ORDER BY CASE k.status WHEN 'active' THEN 0 WHEN 'retiring' THEN 1 ELSE 2 END, k.created_at DESC`,
-      [domainId]
+      organizationId ? [domainId, organizationId] : [domainId]
     );
     return res.rows.map((r) => ({
       id: String(r.id),
@@ -565,6 +597,7 @@ export class PgDomainStore implements DomainStore {
       algorithm: r.algorithm === 'ed25519' ? 'ed25519' : 'rsa2048',
       dnsRecordName: `${String(r.selector)}._domainkey.${String(r.domain_name).toLowerCase()}`,
       publicKeyDnsTxt: String(r.public_key_dns_txt),
+      keyEncryptionVersion: typeof r.key_encryption_version === 'number' ? r.key_encryption_version : 1,
       status: r.status === 'retiring' || r.status === 'revoked' ? r.status : 'active',
       rotatedAt: isoOrNull(r.rotated_at as Date | string | null),
       createdAt: iso(r.created_at as Date | string),
@@ -576,19 +609,45 @@ export class PgDomainStore implements DomainStore {
     domainName: string,
     selector: string
   ): Promise<StoredDkimKeyRecord> {
-    const existing = await this.listDkimKeys(domainId);
-    const active = existing.find((k) => k.status === 'active');
-    if (active) return active;
-
     const cleanSel = selector.trim().toLowerCase() || 'mp1';
-    const generated = generateDomainDkimKeyPair(domainName, cleanSel, 'rsa2048');
-    const id = uuidv7();
-    await this.pool.query(
-      `INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'active')
-       ON CONFLICT (domain_id, selector) DO NOTHING`,
-      [id, domainId, generated.selector, generated.algorithm, generated.publicKeyDnsTxt, generated.encryptedPrivateKey]
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT id FROM domains WHERE id = $1 FOR UPDATE`, [domainId]);
+      const activeRes = await client.query(
+        `SELECT k.id::text FROM dkim_keys k WHERE k.domain_id = $1 AND k.status = 'active' LIMIT 1`,
+        [domainId]
+      );
+      if ((activeRes.rowCount ?? 0) === 0) {
+        const generated = generateDomainDkimKeyPair(domainName, cleanSel, 'rsa2048');
+        const id = uuidv7();
+        await client.query(
+          `INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, key_encryption_version, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+           ON CONFLICT DO NOTHING`,
+          [
+            id,
+            domainId,
+            generated.selector,
+            generated.algorithm,
+            generated.publicKeyDnsTxt,
+            generated.encryptedPrivateKey,
+            generated.keyEncryptionVersion,
+          ]
+        );
+        await client.query(
+          `UPDATE domains SET active_dkim_selector = COALESCE(active_dkim_selector, $2), updated_at = NOW() WHERE id = $1`,
+          [domainId, generated.selector]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
     const refreshed = await this.listDkimKeys(domainId);
     const activeAfter = refreshed.find((k) => k.status === 'active') ?? refreshed[0];
     if (!activeAfter) throw new Error('Failed persisting DKIM key');
@@ -601,30 +660,49 @@ export class PgDomainStore implements DomainStore {
     selector: string,
     algorithm: 'rsa2048' | 'ed25519'
   ): Promise<StoredDkimKeyRecord | null> {
-    const dom = await this.getDomain(orgId, domainId);
-    if (!dom) return null;
     const normSel = selector.trim().toLowerCase();
-    const generated = generateDomainDkimKeyPair(dom.domainName, normSel, algorithm);
     const keyId = uuidv7();
 
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      const domRes = await client.query(
+        `SELECT domain_name::text AS domain_name
+           FROM domains
+          WHERE organization_id = $1 AND id = $2
+          FOR UPDATE`,
+        [orgId, domainId]
+      );
+      const domRow = domRes.rows[0];
+      if (!domRow) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const domainName = String(domRow.domain_name).toLowerCase();
       const dup = await client.query(
         `SELECT 1 FROM dkim_keys WHERE domain_id = $1 AND selector = $2 LIMIT 1`,
         [domainId, normSel]
       );
       if ((dup.rowCount ?? 0) > 0) {
-        throw new AppError(409, 'SELECTOR_EXISTS', `Selector "${normSel}" already exists on ${dom.domainName}`);
+        throw new AppError(409, 'SELECTOR_EXISTS', `Selector "${normSel}" already exists on ${domainName}`);
       }
+      const generated = generateDomainDkimKeyPair(domainName, normSel, algorithm);
       await client.query(
         `UPDATE dkim_keys SET status = 'retiring', rotated_at = NOW() WHERE domain_id = $1 AND status = 'active'`,
         [domainId]
       );
       await client.query(
-        `INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'active')`,
-        [keyId, domainId, generated.selector, generated.algorithm, generated.publicKeyDnsTxt, generated.encryptedPrivateKey]
+        `INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, key_encryption_version, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')`,
+        [
+          keyId,
+          domainId,
+          generated.selector,
+          generated.algorithm,
+          generated.publicKeyDnsTxt,
+          generated.encryptedPrivateKey,
+          generated.keyEncryptionVersion,
+        ]
       );
       await client.query(
         `UPDATE domains SET active_dkim_selector = $2, updated_at = NOW() WHERE id = $1`,
@@ -638,27 +716,124 @@ export class PgDomainStore implements DomainStore {
       client.release();
     }
 
-    const keys = await this.listDkimKeys(domainId);
+    const keys = await this.listDkimKeys(domainId, orgId);
     return keys.find((k) => k.id === keyId) ?? null;
   }
 
   async revokeDkimKey(orgId: string, domainId: string, keyId: string): Promise<boolean> {
-    const dom = await this.getDomain(orgId, domainId);
-    if (!dom) return false;
-    const rowRes = await this.pool.query(
-      `SELECT status FROM dkim_keys WHERE domain_id = $1 AND id = $2 LIMIT 1`,
-      [domainId, keyId]
-    );
-    const row = rowRes.rows[0];
-    if (!row) return false;
-    if (row.status === 'active') {
-      throw new AppError(400, 'CANNOT_REVOKE_ACTIVE', 'Rotate to a new active DKIM selector before revoking this key');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const domRes = await client.query(
+        `SELECT id FROM domains WHERE organization_id = $1 AND id = $2 FOR UPDATE`,
+        [orgId, domainId]
+      );
+      if ((domRes.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const rowRes = await client.query(
+        `SELECT status FROM dkim_keys WHERE domain_id = $1 AND id = $2 FOR UPDATE`,
+        [domainId, keyId]
+      );
+      const row = rowRes.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      if (row.status === 'active') {
+        throw new AppError(400, 'CANNOT_REVOKE_ACTIVE', 'Rotate to a new active DKIM selector before revoking this key');
+      }
+      const res = await client.query(
+        `UPDATE dkim_keys SET status = 'revoked' WHERE domain_id = $1 AND id = $2`,
+        [domainId, keyId]
+      );
+      await client.query('COMMIT');
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-    const res = await this.pool.query(
-      `UPDATE dkim_keys SET status = 'revoked' WHERE domain_id = $1 AND id = $2`,
-      [domainId, keyId]
-    );
-    return (res.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Safely re-encrypts all DKIM private keys from older `key_encryption_version` values
+   * to `ring.activeVersion` inside an atomic transaction, verifying each key derives the
+   * exact stored `public_key_dns_txt` with the new KEK before committing.
+   */
+  async reencryptAllDkimKeysToActiveVersion(
+    kekRing = resolveDkimKekRing()
+  ): Promise<{ total: number; reencrypted: number; alreadyCurrent: number; verified: number }> {
+    const targetVersion = kekRing.activeVersion;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const rows = await client.query(
+        `SELECT id::text, domain_id::text, selector, algorithm, public_key_dns_txt, encrypted_private_key, key_encryption_version
+           FROM dkim_keys
+          FOR UPDATE`
+      );
+
+      let reencrypted = 0;
+      let alreadyCurrent = 0;
+      let verified = 0;
+
+      for (const r of rows.rows) {
+        const keyId = String(r.id);
+        const algo: 'rsa2048' | 'ed25519' = r.algorithm === 'ed25519' ? 'ed25519' : 'rsa2048';
+        const storedPubTxt = String(r.public_key_dns_txt);
+        const currentVer = typeof r.key_encryption_version === 'number' ? r.key_encryption_version : 1;
+        const encBuf = Buffer.isBuffer(r.encrypted_private_key)
+          ? r.encrypted_private_key
+          : Buffer.from(r.encrypted_private_key as Uint8Array);
+
+        if (currentVer === targetVersion) {
+          // Verify existing row can still decrypt cleanly with targetVersion
+          const derived = derivePublicKeyDnsTxtFromEncrypted(kekRing, targetVersion, algo, encBuf);
+          const normExpected = extractNormalizedDkimPublicKeyBase64(storedPubTxt).canonicalPkcs1Base64;
+          const normDerived = extractNormalizedDkimPublicKeyBase64(derived).canonicalPkcs1Base64;
+          if (!normExpected || normExpected !== normDerived) {
+            throw new Error(`Public key integrity check failed for DKIM key ${keyId}`);
+          }
+          alreadyCurrent += 1;
+          verified += 1;
+          continue;
+        }
+
+        const rotated = reencryptDkimPrivateKey(kekRing, currentVer, encBuf, targetVersion);
+        const derivedAfter = derivePublicKeyDnsTxtFromEncrypted(
+          kekRing,
+          rotated.keyEncryptionVersion,
+          algo,
+          rotated.encryptedPrivateKey
+        );
+        const normExpected = extractNormalizedDkimPublicKeyBase64(storedPubTxt).canonicalPkcs1Base64;
+        const normDerived = extractNormalizedDkimPublicKeyBase64(derivedAfter).canonicalPkcs1Base64;
+        if (!normExpected || normExpected !== normDerived) {
+          throw new Error(`Re-encrypted key failed public key derivation verification for ${keyId}`);
+        }
+
+        await client.query(
+          `UPDATE dkim_keys
+              SET encrypted_private_key = $2,
+                  key_encryption_version = $3
+            WHERE id = $1`,
+          [keyId, rotated.encryptedPrivateKey, rotated.keyEncryptionVersion]
+        );
+        reencrypted += 1;
+        verified += 1;
+      }
+
+      await client.query('COMMIT');
+      return { total: rows.rows.length, reencrypted, alreadyCurrent, verified };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async recordDnsCheckResult(

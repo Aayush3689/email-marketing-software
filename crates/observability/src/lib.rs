@@ -34,6 +34,10 @@ pub struct MetricsRegistry {
     pub pool_connections_reused_total: IntCounterVec,
     pub adaptive_throttles_total: IntCounterVec,
     pub stage_latency_seconds: HistogramVec,
+    pub dkim_signing_attempts_total: IntCounterVec,
+    pub dkim_signing_successes_total: IntCounterVec,
+    pub dkim_signing_failures_total: IntCounterVec,
+    pub dkim_key_reload_total: IntCounterVec,
 }
 
 impl MetricsRegistry {
@@ -90,6 +94,34 @@ impl MetricsRegistry {
             ]),
             &["stage", "pool"],
         )?;
+        let dkim_signing_attempts_total = IntCounterVec::new(
+            Opts::new(
+                "mta_dkim_signing_attempts_total",
+                "Total outbound DKIM signing attempts by algorithm and domain policy",
+            ),
+            &["algorithm", "policy"],
+        )?;
+        let dkim_signing_successes_total = IntCounterVec::new(
+            Opts::new(
+                "mta_dkim_signing_successes_total",
+                "Total successful outbound DKIM signatures",
+            ),
+            &["algorithm"],
+        )?;
+        let dkim_signing_failures_total = IntCounterVec::new(
+            Opts::new(
+                "mta_dkim_signing_failures_total",
+                "Total outbound DKIM signing failures by reason (never includes secret values)",
+            ),
+            &["reason"],
+        )?;
+        let dkim_key_reload_total = IntCounterVec::new(
+            Opts::new(
+                "mta_dkim_key_reload_total",
+                "Total DKIM key ring reload attempts from PostgreSQL",
+            ),
+            &["outcome"],
+        )?;
 
         registry.register(Box::new(smtp_active_connections.clone()))?;
         registry.register(Box::new(outbound_active_workers.clone()))?;
@@ -98,6 +130,10 @@ impl MetricsRegistry {
         registry.register(Box::new(pool_connections_reused_total.clone()))?;
         registry.register(Box::new(adaptive_throttles_total.clone()))?;
         registry.register(Box::new(stage_latency_seconds.clone()))?;
+        registry.register(Box::new(dkim_signing_attempts_total.clone()))?;
+        registry.register(Box::new(dkim_signing_successes_total.clone()))?;
+        registry.register(Box::new(dkim_signing_failures_total.clone()))?;
+        registry.register(Box::new(dkim_key_reload_total.clone()))?;
 
         Ok(Self {
             registry,
@@ -108,6 +144,10 @@ impl MetricsRegistry {
             pool_connections_reused_total,
             adaptive_throttles_total,
             stage_latency_seconds,
+            dkim_signing_attempts_total,
+            dkim_signing_successes_total,
+            dkim_signing_failures_total,
+            dkim_key_reload_total,
         })
     }
 
@@ -137,6 +177,30 @@ impl MetricsRegistry {
     pub fn record_adaptive_throttle(&self, provider: &str) {
         self.adaptive_throttles_total
             .with_label_values(&[provider])
+            .inc();
+    }
+
+    pub fn record_dkim_attempt(&self, algorithm: &str, policy: &str) {
+        self.dkim_signing_attempts_total
+            .with_label_values(&[algorithm, policy])
+            .inc();
+    }
+
+    pub fn record_dkim_success(&self, algorithm: &str) {
+        self.dkim_signing_successes_total
+            .with_label_values(&[algorithm])
+            .inc();
+    }
+
+    pub fn record_dkim_failure(&self, reason: &str) {
+        self.dkim_signing_failures_total
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    pub fn record_dkim_reload(&self, outcome: &str) {
+        self.dkim_key_reload_total
+            .with_label_values(&[outcome])
             .inc();
     }
 

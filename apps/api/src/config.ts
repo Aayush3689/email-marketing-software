@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { resolveDkimKekRing } from './services/dkim-service.js';
+
 const PLACEHOLDER_SECRETS = [
   'replace_with_at_least_32_byte_random_access_secret',
   'replace_with_at_least_32_byte_random_refresh_secret',
@@ -30,6 +32,8 @@ const envSchema = z.object({
   TRACKING_CNAME_TARGET: z.string().min(3).optional(),
   DKIM_SELECTOR: z.string().min(1).default('mp1'),
   DKIM_KEK_HEX: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+  DKIM_KEK_KEYS: z.string().optional(),
+  DKIM_KEK_ACTIVE_VERSION: z.coerce.number().int().min(1).optional(),
   DNS_CHECK_TIMEOUT_MS: z.coerce.number().int().min(500).max(15000).default(3500),
   PRIMARY_DOMAIN: z.string().min(3).optional(),
   ADMIN_BOOTSTRAP_EMAIL: z.string().email().optional(),
@@ -63,6 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
         throw new Error(`${name} must not use placeholder values when NODE_ENV=production`);
       }
     }
+    resolveDkimKekRing(env);
   }
   return cfg;
 }

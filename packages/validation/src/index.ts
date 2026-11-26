@@ -112,6 +112,7 @@ export const updateDomainSettingsSchema = z.object({
   bimiSelector: dkimSelectorSchema.optional(),
   bimiLogoUrl: safeHttpsUrlSchema.nullable().optional(),
   bimiVmcUrl: safeHttpsUrlSchema.nullable().optional(),
+  dkimPolicy: z.enum(['required', 'optional']).optional(),
 });
 
 export type UpdateDomainSettingsRequest = z.infer<typeof updateDomainSettingsSchema>;

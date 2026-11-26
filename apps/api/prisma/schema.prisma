@@ -91,6 +91,7 @@ model Domain {
   isSuspended            Boolean   @default(false) @map("is_suspended")
   suspensionReason       String?   @map("suspension_reason")
   activeDkimSelector     String?   @map("active_dkim_selector")
+  dkimPolicy             String    @default("required") @map("dkim_policy")
   customReturnPathDomain String?   @map("custom_return_path_domain") @db.Citext
   customTrackingDomain   String?   @map("custom_tracking_domain") @db.Citext
   defaultSenderLocalPart String?   @map("default_sender_local_part")

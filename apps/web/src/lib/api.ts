@@ -154,6 +154,7 @@ export interface DomainItem {
   isSuspended: boolean;
   suspensionReason?: string | null;
   activeDkimSelector: string | null;
+  dkimPolicy?: 'required' | 'optional';
   customReturnPathDomain?: string | null;
   customTrackingDomain?: string | null;
   defaultSenderLocalPart?: string | null;
@@ -227,6 +228,7 @@ export interface DomainDetailResponse {
 export interface DomainUpdatePatch {
   sendingEnabled?: boolean;
   hostingEnabled?: boolean;
+  dkimPolicy?: 'required' | 'optional';
   defaultSenderLocalPart?: string | null;
   customReturnPathDomain?: string | null;
   customTrackingDomain?: string | null;

@@ -40,6 +40,7 @@ export interface DomainRecord {
   isSuspended: boolean;
   suspensionReason: string | null;
   activeDkimSelector: string | null;
+  dkimPolicy: 'required' | 'optional';
   customReturnPathDomain: string | null;
   customTrackingDomain: string | null;
   defaultSenderLocalPart: string | null;
@@ -68,6 +69,7 @@ export interface StoredDkimKeyRecord {
   algorithm: 'rsa2048' | 'ed25519';
   dnsRecordName: string;
   publicKeyDnsTxt: string;
+  keyEncryptionVersion?: number;
   status: 'active' | 'retiring' | 'revoked';
   rotatedAt: string | null;
   createdAt: string;
@@ -99,6 +101,7 @@ export interface DomainAuditEvent {
 export interface DomainUpdatePatch {
   hostingEnabled?: boolean;
   sendingEnabled?: boolean;
+  dkimPolicy?: 'required' | 'optional';
   defaultSenderLocalPart?: string | null;
   customReturnPathDomain?: string | null;
   customTrackingDomain?: string | null;
@@ -281,6 +284,7 @@ export class InMemoryDomainStore implements DomainStore {
       isSuspended: false,
       suspensionReason: null,
       activeDkimSelector: defaultSel,
+      dkimPolicy: 'required',
       customReturnPathDomain: null,
       customTrackingDomain: null,
       defaultSenderLocalPart: 'noreply',
@@ -359,6 +363,7 @@ export class InMemoryDomainStore implements DomainStore {
       algorithm: generated.algorithm,
       dnsRecordName: generated.dnsRecordName,
       publicKeyDnsTxt: generated.publicKeyDnsTxt,
+      keyEncryptionVersion: generated.keyEncryptionVersion,
       status: 'active',
       rotatedAt: null,
       createdAt: new Date().toISOString(),
@@ -394,6 +399,7 @@ export class InMemoryDomainStore implements DomainStore {
       algorithm: generated.algorithm,
       dnsRecordName: generated.dnsRecordName,
       publicKeyDnsTxt: generated.publicKeyDnsTxt,
+      keyEncryptionVersion: generated.keyEncryptionVersion,
       status: 'active',
       rotatedAt: null,
       createdAt: now,
@@ -740,12 +746,12 @@ function buildFallbackEvaluations(
 }
 
 function buildDkimSummaries(
-  domain: DomainRecord,
+  _domain: DomainRecord,
   keys: StoredDkimKeyRecord[],
   latestCheck: DomainDnsCheckHistoryItem | undefined,
-  mtaLoadedSelectors: string[]
+  mtaLoadedSelectors: string[],
+  mtaReachable: boolean
 ): DkimKeySummary[] {
-  const activeSel = domain.activeDkimSelector ?? 'mp1';
   return keys.map((k) => {
     const rec = latestCheck?.records.find((r) => r.id === `dkim-${k.selector}`);
     return {
@@ -755,11 +761,10 @@ function buildDkimSummaries(
       algorithm: k.algorithm,
       dnsRecordName: k.dnsRecordName,
       publicKeyDnsTxt: k.publicKeyDnsTxt,
+      ...(k.keyEncryptionVersion !== undefined ? { keyEncryptionVersion: k.keyEncryptionVersion } : {}),
       status: k.status,
       dnsVerified: rec?.status === 'pass',
-      mtaLoaded:
-        mtaLoadedSelectors.includes(k.selector) ||
-        (mtaLoadedSelectors.length === 0 && k.selector === activeSel && k.status === 'active'),
+      mtaLoaded: mtaReachable && mtaLoadedSelectors.includes(k.selector),
       rotatedAt: k.rotatedAt,
       createdAt: k.createdAt,
     };
@@ -938,7 +943,7 @@ export function createDomainsRouter(deps: {
     const mtaLoadedSelectors = mtaStatus?.activeSelectors?.[domain.domainName.toLowerCase()] ?? [];
     const summaryItem = deriveDomainHealthSummary(domain, latestCheck, hosting?.mailboxCount ?? 0);
     const records = latestCheck?.records ?? buildFallbackEvaluations(domain, dkimKeys);
-    const dkimSummaries = buildDkimSummaries(domain, dkimKeys, latestCheck, mtaLoadedSelectors);
+    const dkimSummaries = buildDkimSummaries(domain, dkimKeys, latestCheck, mtaLoadedSelectors, Boolean(mtaStatus));
     const infra = getInfraDnsConfig();
 
     const notifications: DomainNotification[] = [];
@@ -1192,6 +1197,7 @@ export function createDomainsRouter(deps: {
     const domain = await deps.store.updateSettings(orgId, domainId, {
       ...(patch.hostingEnabled !== undefined ? { hostingEnabled: patch.hostingEnabled } : {}),
       ...(patch.sendingEnabled !== undefined ? { sendingEnabled: patch.sendingEnabled } : {}),
+      ...(patch.dkimPolicy !== undefined ? { dkimPolicy: patch.dkimPolicy } : {}),
       ...(patch.defaultSenderLocalPart !== undefined ? { defaultSenderLocalPart: patch.defaultSenderLocalPart } : {}),
       ...(patch.customReturnPathDomain !== undefined ? { customReturnPathDomain: patch.customReturnPathDomain } : {}),
       ...(patch.customTrackingDomain !== undefined ? { customTrackingDomain: patch.customTrackingDomain } : {}),

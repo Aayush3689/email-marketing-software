@@ -13,9 +13,13 @@ import { InMemoryMailboxStore } from './mailboxes.js';
 import { InMemoryWebhookStore } from './webhooks.js';
 import {
   decryptDkimPrivateKey,
+  decryptDkimPrivateKeyVersioned,
+  derivePublicKeyDnsTxtFromEncrypted,
   extractNormalizedDkimPublicKeyBase64,
   generateDomainDkimKeyPair,
+  reencryptDkimPrivateKey,
   resolveDkimKek,
+  resolveDkimKekRing,
 } from '../services/dkim-service.js';
 import type { DnsLookupAdapter, MxRecordValue } from '../services/dns-verifier.js';
 
@@ -423,5 +427,114 @@ describe('Enterprise Domains & DNS Authentication Center', () => {
       body: JSON.stringify({ confirmDomainName: 'async-del.example', confirmCleanup: true }),
     });
     assert.equal(delOk.status, 204);
+  });
+
+  it('supports versioned KEK ring, re-encryption, multi-record DNS conflict detection, and cross-tenant isolation', async () => {
+    const v1Hex = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const v2Hex = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+
+    // Reject missing, malformed, and default dev keys in production
+    assert.throws(() => resolveDkimKekRing({ NODE_ENV: 'production' }), /required in production/);
+    assert.throws(() => resolveDkimKekRing({ NODE_ENV: 'production', DKIM_KEK_HEX: v1Hex }), /default development key/);
+    assert.throws(() => resolveDkimKekRing({ NODE_ENV: 'development', DKIM_KEK_HEX: 'badhex' }), /64 hex characters/);
+
+    // V1 ring generates and encrypts with version 1
+    const ringV1 = resolveDkimKekRing({ NODE_ENV: 'development', DKIM_KEK_HEX: v1Hex });
+    const rsaV1 = generateDomainDkimKeyPair('fastconnect.in', 'mp1', 'rsa2048', ringV1);
+    const edV1 = generateDomainDkimKeyPair('fastconnect.in', 'ed1', 'ed25519', ringV1);
+    assert.equal(rsaV1.keyEncryptionVersion, 1);
+    assert.equal(edV1.keyEncryptionVersion, 1);
+
+    // Tampered tag must fail GCM authentication
+    const tampered = Buffer.from(rsaV1.encryptedPrivateKey);
+    tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 0xff;
+    assert.throws(() => decryptDkimPrivateKeyVersioned(ringV1, 1, tampered));
+
+    // Dual KEK ring: V1 decrypts old records, V2 is active for new writes & re-encryption
+    const ringDual = resolveDkimKekRing({
+      NODE_ENV: 'production',
+      DKIM_KEK_V1_HEX: '1111111111111111111111111111111111111111111111111111111111111111',
+      DKIM_KEK_V2_HEX: v2Hex,
+      DKIM_KEK_ACTIVE_VERSION: '2',
+    });
+    assert.equal(ringDual.activeVersion, 2);
+
+    const rsaOld = generateDomainDkimKeyPair(
+      'tenant-a.example',
+      'mp1',
+      'rsa2048',
+      Buffer.from('1111111111111111111111111111111111111111111111111111111111111111', 'hex')
+    );
+    const rotated = reencryptDkimPrivateKey(ringDual, 1, rsaOld.encryptedPrivateKey, 2);
+    assert.equal(rotated.keyEncryptionVersion, 2);
+
+    // Retire V1 completely and verify V2-only ring derives the exact same DNS public key
+    const ringV2Only = resolveDkimKekRing({ NODE_ENV: 'production', DKIM_KEK_V2_HEX: v2Hex });
+    const derivedTxt = derivePublicKeyDnsTxtFromEncrypted(ringV2Only, 2, 'rsa2048', rotated.encryptedPrivateKey);
+    assert.equal(
+      extractNormalizedDkimPublicKeyBase64(derivedTxt).canonicalPkcs1Base64,
+      extractNormalizedDkimPublicKeyBase64(rsaOld.publicKeyDnsTxt).canonicalPkcs1Base64
+    );
+
+    // Cross-tenant isolation & DKIM policy + conflicting DNS records test
+    const createA = await fetch(`${baseUrl}/v1/domains`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${orgAToken}` },
+      body: JSON.stringify({ domainName: 'iso-a.example', sendingEnabled: true, hostingEnabled: false }),
+    });
+    assert.equal(createA.status, 201);
+    const { domain: domA, dkimKeys: keysA } = (await createA.json()) as {
+      domain: { id: string; verificationToken: string; dkimPolicy: string };
+      dkimKeys: Array<{ id: string; selector: string; publicKeyDnsTxt: string }>;
+    };
+    assert.equal(domA.dkimPolicy, 'required');
+
+    // Update dkimPolicy to optional & back to required
+    const optRes = await fetch(`${baseUrl}/v1/domains/${domA.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${orgAToken}` },
+      body: JSON.stringify({ dkimPolicy: 'optional' }),
+    });
+    assert.equal(optRes.status, 200);
+    assert.equal(((await optRes.json()) as { domain: { dkimPolicy: string } }).domain.dkimPolicy, 'optional');
+
+    // Org B cannot read or rotate Org A domain DKIM keys
+    const regB = await fetch(`${baseUrl}/v1/auth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: 'orgb@example.com',
+        password: 'VeryStrongPassword123!',
+        fullName: 'Org B Admin',
+        organizationName: 'Org B',
+      }),
+    });
+    assert.equal(regB.status, 201);
+    const orgBToken = ((await regB.json()) as { accessToken: string }).accessToken;
+    const crossGet = await fetch(`${baseUrl}/v1/domains/${domA.id}`, {
+      headers: { authorization: `Bearer ${orgBToken}` },
+    });
+    assert.equal(crossGet.status, 404);
+    const crossRot = await fetch(`${baseUrl}/v1/domains/${domA.id}/dkim/rotate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${orgBToken}` },
+      body: JSON.stringify({ selector: 'mp9', algorithm: 'rsa2048' }),
+    });
+    assert.equal(crossRot.status, 404);
+
+    // DNS diagnostics must reject conflicting multiple DKIM TXT records & invalid format
+    const otherKey = generateDomainDkimKeyPair('iso-a.example', 'mp1', 'rsa2048', ringV1);
+    zone.txt.set('mp1._domainkey.iso-a.example', [keysA[0]!.publicKeyDnsTxt, otherKey.publicKeyDnsTxt]);
+    const diagConflict = await fetch(`${baseUrl}/v1/domains/${domA.id}/diagnostics`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${orgAToken}` },
+    });
+    assert.equal(diagConflict.status, 200);
+    const conflictJson = (await diagConflict.json()) as {
+      check: { dkimStatus: string; records: Array<{ id: string; status: string; remediation: string }> };
+    };
+    assert.equal(conflictJson.check.dkimStatus, 'fail');
+    const dkimEval = conflictJson.check.records.find((r) => r.id === 'dkim-mp1')!;
+    assert.match(dkimEval.remediation, /Multiple conflicting DKIM TXT records/i);
   });
 });
