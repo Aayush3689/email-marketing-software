@@ -1,0 +1,20 @@
+FROM rust:1.85-bookworm AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY services/mail-engine ./services/mail-engine
+RUN cargo build --release --bin mail-engine
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system mailplat \
+    && useradd --system --gid mailplat --no-create-home mailplat
+COPY --from=builder /app/target/release/mail-engine /usr/local/bin/mail-engine
+RUN mkdir -p /var/spool/mailplat /etc/mail-certs \
+    && chown -R mailplat:mailplat /var/spool/mailplat /etc/mail-certs \
+    && setcap 'cap_net_bind_service=+ep' /usr/local/bin/mail-engine
+USER mailplat
+EXPOSE 25 465 587 9100
+ENTRYPOINT ["/usr/local/bin/mail-engine"]

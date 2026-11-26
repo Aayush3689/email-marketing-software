@@ -1,0 +1,11 @@
+[package]
+name = "mime-parser"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mail-builder.workspace = true
+mail-parser.workspace = true

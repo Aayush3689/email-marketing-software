@@ -1,0 +1,14 @@
+[package]
+name = "mailbox-client"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+smtp-outbound = { path = "../smtp-outbound" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -1,0 +1,364 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mailplat-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mailplat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_local_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-mailplat}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mailplat} -d ${POSTGRES_DB:-mailplat}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mailplat-internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: mailplat-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-change_me_redis_dev_only}"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=${REDIS_PASSWORD:-change_me_redis_dev_only} redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - mailplat-internal
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: mailplat-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-mailplat}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-change_me_local_dev_only}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mailplat-internal
+
+  minio:
+    image: minio/minio:latest
+    container_name: mailplat-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadminsecret}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mailplat-internal
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: mailplat-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $${S3_ACCESS_KEY:-minioadmin} $${S3_SECRET_KEY:-minioadminsecret}; do sleep 2; done;
+      mc mb --ignore-existing local/$${S3_BUCKET:-mail-spool};
+      "
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadminsecret}
+      S3_BUCKET: ${S3_BUCKET:-mail-spool}
+    networks:
+      - mailplat-internal
+
+  dovecot:
+    build:
+      context: ../dovecot
+    container_name: mailplat-dovecot
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mailplat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_local_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-mailplat}
+    ports:
+      - "993:993"
+    volumes:
+      - dovecotmail:/var/mail/vhosts
+      - ../../certs:/etc/mail-certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "doveadm service status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mailplat-internal
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+    container_name: mailplat-api
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    command: ["node", "apps/api/dist/index.js"]
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - spooldata:/var/spool/mailplat
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mailplat-internal
+
+  scheduler:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+    container_name: mailplat-scheduler
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    command: ["node", "services/scheduler/dist/index.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f services/scheduler/dist/index.js >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mailplat-internal
+
+  mailbox-service:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+    container_name: mailplat-mailbox-service
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    command: ["node", "services/mailbox-service/dist/index.js"]
+    ports:
+      - "127.0.0.1:4100:4100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dovecot:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4100/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mailplat-internal
+
+  mail-engine:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.mail-engine
+    container_name: mailplat-mail-engine
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    ports:
+      - "25:25"
+      - "587:587"
+      - "465:465"
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - spooldata:/var/spool/mailplat
+      - ../../certs:/etc/mail-certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9100/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mailplat-internal
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.frontend
+      args:
+        WORKSPACE: "@mail/web"
+        APP_DIR: "apps/web"
+    container_name: mailplat-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - mailplat-internal
+
+  mail:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.frontend
+      args:
+        WORKSPACE: "@mail/webmail"
+        APP_DIR: "apps/mail"
+    container_name: mailplat-mail
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5174:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - mailplat-internal
+
+  admin:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.frontend
+      args:
+        WORKSPACE: "@mail/admin"
+        APP_DIR: "apps/admin"
+    container_name: mailplat-admin
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5175:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - mailplat-internal
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: mailplat-prometheus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - mailplat-internal
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: mailplat-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me_grafana}
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - mailplat-internal
+
+  nginx:
+    image: nginx:alpine
+    container_name: mailplat-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../../certs:/etc/mail-certs:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      mailbox-service:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+      mail:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - mailplat-internal
+
+volumes:
+  pgdata:
+  redisdata:
+  rabbitmqdata:
+  miniodata:
+  promdata:
+  grafanadata:
+  dovecotmail:
+  spooldata:
+
+networks:
+  mailplat-internal:
+    driver: bridge

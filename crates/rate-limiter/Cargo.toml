@@ -1,0 +1,10 @@
+[package]
+name = "rate-limiter"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio.workspace = true

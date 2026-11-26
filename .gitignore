@@ -1,0 +1,24 @@
+# Dependencies & Build Artifacts
+node_modules/
+dist/
+dist-test/
+build/
+.vite/
+*.tsbuildinfo
+target/
+**/*.rs.bk
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Local Data & Logs
+data/
+spool/
+logs/
+*.log
+.DS_Store

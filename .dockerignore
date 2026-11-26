@@ -1,0 +1,14 @@
+.git/
+node_modules/
+target/
+**/dist/
+**/dist-test/
+**/*.tsbuildinfo
+.env
+.env.*
+!.env.example
+certs/
+*.pem
+*.key
+*.log
+.DS_Store

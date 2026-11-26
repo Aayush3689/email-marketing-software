@@ -1,0 +1,16 @@
+[package]
+name = "auth-verification"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mail-auth.workspace = true
+
+[dev-dependencies]
+dkim = { path = "../dkim" }
+mail-auth = { version = "0.4", features = ["generate", "ring", "rustls-pemfile", "test"] }
+tokio.workspace = true

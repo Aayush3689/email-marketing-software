@@ -1,0 +1,26 @@
+[package]
+name = "delivery-engine"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+dns-resolver = { path = "../dns-resolver" }
+message-storage = { path = "../message-storage" }
+observability = { path = "../observability" }
+rand.workspace = true
+smtp-outbound = { path = "../smtp-outbound" }
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true
+libc.workspace = true
+smtp-protocol = { path = "../smtp-protocol" }
+smtp-server = { path = "../smtp-server" }
+smtp-session = { path = "../smtp-session" }

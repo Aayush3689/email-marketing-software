@@ -1,0 +1,12 @@
+[package]
+name = "bounce-handler"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hex.workspace = true
+mail-parser.workspace = true
+sha2.workspace = true

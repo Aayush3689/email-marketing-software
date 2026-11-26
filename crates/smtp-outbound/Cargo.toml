@@ -1,0 +1,22 @@
+[package]
+name = "smtp-outbound"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+smtp-protocol = { path = "../smtp-protocol" }
+smtp-server = { path = "../smtp-server" }
+smtp-session = { path = "../smtp-session" }
+observability = { path = "../observability" }

@@ -1,0 +1,33 @@
+FROM node:22-alpine AS builder
+RUN apk add --no-cache python3 make g++
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps/api/package.json ./apps/api/package.json
+COPY services/scheduler/package.json ./services/scheduler/package.json
+COPY services/mailbox-service/package.json ./services/mailbox-service/package.json
+RUN npm ci
+COPY apps/api ./apps/api
+COPY services/scheduler ./services/scheduler
+COPY services/mailbox-service ./services/mailbox-service
+RUN npm run build -w @mail/shared-types \
+  && npm run build -w @mail/validation \
+  && npm run build -w @mail/api \
+  && npm run build -w @mail/scheduler \
+  && npm run build -w @mail/mailbox-service \
+  && npm prune --omit=dev
+
+FROM node:22-alpine AS runtime
+WORKDIR /app
+RUN mkdir -p /var/spool/mailplat && chown -R node:node /var/spool/mailplat
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/package.json ./package.json
+COPY --from=builder --chown=node:node /app/packages ./packages
+COPY --from=builder --chown=node:node /app/apps/api/package.json ./apps/api/package.json
+COPY --from=builder --chown=node:node /app/apps/api/dist ./apps/api/dist
+COPY --from=builder --chown=node:node /app/services/scheduler/package.json ./services/scheduler/package.json
+COPY --from=builder --chown=node:node /app/services/scheduler/dist ./services/scheduler/dist
+COPY --from=builder --chown=node:node /app/services/mailbox-service/package.json ./services/mailbox-service/package.json
+COPY --from=builder --chown=node:node /app/services/mailbox-service/dist ./services/mailbox-service/dist
+USER node
+CMD ["node", "apps/api/dist/index.js"]

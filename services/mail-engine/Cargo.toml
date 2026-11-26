@@ -1,0 +1,38 @@
+[package]
+name = "mail-engine"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+argon2.workspace = true
+auth-verification = { path = "../../crates/auth-verification" }
+bounce-handler = { path = "../../crates/bounce-handler" }
+bytes.workspace = true
+chrono.workspace = true
+delivery-engine = { path = "../../crates/delivery-engine" }
+dkim = { path = "../../crates/dkim" }
+dns-resolver = { path = "../../crates/dns-resolver" }
+futures-lite.workspace = true
+lapin.workspace = true
+mail-parser.workspace = true
+mailbox-client = { path = "../../crates/mailbox-client" }
+message-storage = { path = "../../crates/message-storage" }
+observability = { path = "../../crates/observability" }
+queue-engine = { path = "../../crates/queue-engine" }
+rand.workspace = true
+rate-limiter = { path = "../../crates/rate-limiter" }
+serde.workspace = true
+serde_json.workspace = true
+smtp-inbound = { path = "../../crates/smtp-inbound" }
+smtp-outbound = { path = "../../crates/smtp-outbound" }
+smtp-protocol = { path = "../../crates/smtp-protocol" }
+smtp-server = { path = "../../crates/smtp-server" }
+smtp-session = { path = "../../crates/smtp-session" }
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

@@ -1,0 +1,26 @@
+{
+  "name": "mail-infrastructure",
+  "version": "0.1.0",
+  "private": true,
+  "description": "High-performance Email Infrastructure & Email Hosting SaaS",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/mailbox-service",
+    "services/scheduler"
+  ],
+  "scripts": {
+    "build": "npm run build -w @mail/shared-types && npm run build -w @mail/validation && npm run build -w @mail/ui && npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  }
+}

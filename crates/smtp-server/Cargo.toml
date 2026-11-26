@@ -1,0 +1,22 @@
+[package]
+name = "smtp-server"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+observability = { path = "../observability" }
+rate-limiter = { path = "../rate-limiter" }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+smtp-protocol = { path = "../smtp-protocol" }
+smtp-session = { path = "../smtp-session" }
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true

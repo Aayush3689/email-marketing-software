@@ -1,0 +1,145 @@
+// Aligned with migrations/0001_initial_schema.sql (SQL-first migration authority).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String    @id @db.Uuid
+  email           String    @unique @db.Citext
+  passwordHash    String    @map("password_hash")
+  fullName        String    @map("full_name")
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz
+  mfaEnabled      Boolean   @default(false) @map("mfa_enabled")
+  status          String    @default("active")
+  platformRole    String    @default("none") @map("platform_role")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz
+
+  sessions    UserSession[]
+  memberships OrganizationMember[]
+
+  @@map("users")
+}
+
+model UserSession {
+  id               String    @id @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  appSurface       String    @map("app_surface")
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  tokenFamilyId    String    @map("token_family_id") @db.Uuid
+  ipAddress        String?   @map("ip_address") @db.Inet
+  userAgent        String?   @map("user_agent")
+  mfaVerifiedAt    DateTime? @map("mfa_verified_at") @db.Timestamptz
+  expiresAt        DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt        DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_sessions")
+}
+
+model Organization {
+  id               String   @id @db.Uuid
+  name             String
+  slug             String   @unique @db.Citext
+  status           String   @default("active")
+  sendingMode      String   @default("sandbox") @map("sending_mode")
+  defaultIpPoolId  String?  @map("default_ip_pool_id") @db.Uuid
+  dailySendLimit   Int      @default(500) @map("daily_send_limit")
+  monthlySendLimit Int      @default(10000) @map("monthly_send_limit")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  members   OrganizationMember[]
+  domains   Domain[]
+  apiKeys   ApiKey[]
+  mailboxes Mailbox[]
+
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String   @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  role           String
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@map("organization_members")
+}
+
+model Domain {
+  id                     String    @id @db.Uuid
+  organizationId         String    @map("organization_id") @db.Uuid
+  domainName             String    @unique @map("domain_name") @db.Citext
+  verificationToken      String    @map("verification_token")
+  ownershipVerifiedAt    DateTime? @map("ownership_verified_at") @db.Timestamptz
+  sendingEnabled         Boolean   @default(false) @map("sending_enabled")
+  hostingEnabled         Boolean   @default(false) @map("hosting_enabled")
+  isSuspended            Boolean   @default(false) @map("is_suspended")
+  suspensionReason       String?   @map("suspension_reason")
+  activeDkimSelector     String?   @map("active_dkim_selector")
+  customReturnPathDomain String?   @map("custom_return_path_domain") @db.Citext
+  customTrackingDomain   String?   @map("custom_tracking_domain") @db.Citext
+  dmarcPolicy            String    @default("none") @map("dmarc_policy")
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt              DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  mailboxes    Mailbox[]
+
+  @@map("domains")
+}
+
+model ApiKey {
+  id             String    @id @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String
+  keyPrefix      String    @map("key_prefix") @db.VarChar(16)
+  keyHash        String    @unique @map("key_hash")
+  scopes         String[]
+  rateLimitRpm   Int       @default(600) @map("rate_limit_rpm")
+  lastUsedAt     DateTime? @map("last_used_at") @db.Timestamptz
+  expiresAt      DateTime? @map("expires_at") @db.Timestamptz
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("api_keys")
+}
+
+model Mailbox {
+  id             String   @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  domainId       String   @map("domain_id") @db.Uuid
+  serverId       String   @map("server_id") @db.Uuid
+  localPart      String   @map("local_part") @db.Citext
+  emailAddress   String   @unique @map("email_address") @db.Citext
+  passwordHash   String   @map("password_hash")
+  displayName    String   @default("") @map("display_name")
+  quotaBytes     BigInt   @default(5368709120) @map("quota_bytes")
+  usedBytes      BigInt   @default(0) @map("used_bytes")
+  status         String   @default("active")
+  isCatchAll     Boolean  @default(false) @map("is_catch_all")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  domain       Domain       @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@unique([domainId, localPart])
+  @@map("mailboxes")
+}

@@ -1,0 +1,19 @@
+[package]
+name = "dkim"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+mail-auth.workspace = true
+rand.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+mail-auth = { version = "0.4", features = ["generate", "ring", "rustls-pemfile", "test"] }

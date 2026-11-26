@@ -1,0 +1,28 @@
+[package]
+name = "smtp-inbound"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+argon2.workspace = true
+bounce-handler = { path = "../bounce-handler" }
+mailbox-client = { path = "../mailbox-client" }
+message-storage = { path = "../message-storage" }
+rate-limiter = { path = "../rate-limiter" }
+smtp-protocol = { path = "../smtp-protocol" }
+smtp-session = { path = "../smtp-session" }
+tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+observability = { path = "../observability" }
+rcgen.workspace = true
+rustls.workspace = true
+smtp-server = { path = "../smtp-server" }
+tokio-rustls.workspace = true

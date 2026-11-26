@@ -1,0 +1,17 @@
+[package]
+name = "smtp-session"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+rustls.workspace = true
+smtp-protocol = { path = "../smtp-protocol" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
