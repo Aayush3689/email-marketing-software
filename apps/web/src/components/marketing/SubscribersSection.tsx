@@ -2,9 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AppDialog, Badge, Button, Card, EmptyState, Input, Skeleton } from '@mail/ui';
 import type { SegmentItem, SubscriberRecord, SubscriberStatus, TagItem } from '@mail/shared-types';
 import {
+  ArrowRight,
+  Check,
   CheckCircle2,
   Download,
   Mail,
+  PanelRight,
   Plus,
   Search,
   Tag,
@@ -17,6 +20,7 @@ import {
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '../../lib/api.js';
+import { invalidateAllTagDependents } from './TagSelector.js';
 
 const STATUS_TONE: Record<SubscriberStatus, 'success' | 'neutral' | 'danger' | 'warning'> = {
   subscribed: 'success',
@@ -30,10 +34,12 @@ export function SubscribersSection({
   initialTagFilter,
   onClearInitialTag,
   onOpenImportWizard,
+  onOpenTagManager,
 }: {
   initialTagFilter?: string | undefined;
   onClearInitialTag?: () => void;
   onOpenImportWizard: () => void;
+  onOpenTagManager?: () => void;
 }) {
   const qc = useQueryClient();
 
@@ -48,6 +54,10 @@ export function SubscribersSection({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkTagInput, setBulkTagInput] = useState('');
   const [profileId, setProfileId] = useState<string | null>(null);
+  const [tagSidebarOpen, setTagSidebarOpen] = useState(false);
+  const [tagSidebarSearch, setTagSidebarSearch] = useState('');
+  const [sidebarSelectedTagIds, setSidebarSelectedTagIds] = useState<Set<string>>(new Set());
+  const [sidebarBusy, setSidebarBusy] = useState(false);
 
   // Add subscriber dialog
   const [addOpen, setAddOpen] = useState(false);
@@ -93,10 +103,7 @@ export function SubscribersSection({
 
   const invalidateAudience = async () => {
     await Promise.all([
-      qc.invalidateQueries({ queryKey: ['subscribers'] }),
-      qc.invalidateQueries({ queryKey: ['tags'] }),
-      qc.invalidateQueries({ queryKey: ['segments'] }),
-      qc.invalidateQueries({ queryKey: ['campaigns'] }),
+      invalidateAllTagDependents(qc),
       ...(profileId ? [qc.invalidateQueries({ queryKey: ['subscriber-profile', profileId] })] : []),
     ]);
   };
@@ -216,6 +223,33 @@ export function SubscribersSection({
     }
   };
 
+  const handleSidebarTagBatch = async (mode: 'add_tag' | 'remove_tag') => {
+    if (selectedIds.size === 0) {
+      toast.error('Select one or more subscribers first');
+      return;
+    }
+    if (sidebarSelectedTagIds.size === 0) {
+      toast.error('Select one or more tags in the sidebar');
+      return;
+    }
+    setSidebarBusy(true);
+    try {
+      const ids = [...selectedIds];
+      for (const tagId of sidebarSelectedTagIds) {
+        await api.bulkSubscribersAction({ ids, action: mode, tagId });
+      }
+      toast.success(
+        `${mode === 'add_tag' ? 'Applied' : 'Removed'} ${sidebarSelectedTagIds.size} tag(s) across ${ids.length} subscriber(s)`
+      );
+      setSidebarSelectedTagIds(new Set());
+      await invalidateAudience();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Tag batch update failed');
+    } finally {
+      setSidebarBusy(false);
+    }
+  };
+
   const subscribers = subsQuery.data?.subscribers ?? [];
   const total = subsQuery.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / 25));
@@ -235,6 +269,14 @@ export function SubscribersSection({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant={tagSidebarOpen ? 'primary' : 'secondary'}
+            onClick={() => setTagSidebarOpen((v) => !v)}
+          >
+            <PanelRight className="h-3.5 w-3.5" />
+            Tags Sidebar
+          </Button>
           <Button size="sm" variant="secondary" onClick={handleExportCsv}>
             <Download className="h-3.5 w-3.5" />
             {selectedIds.size > 0 ? `Export Selected (${selectedIds.size})` : 'Export CSV'}
@@ -391,9 +433,9 @@ export function SubscribersSection({
         </Card>
       )}
 
-      {/* Main grid: Data table + optional profile drawer */}
-      <div className={`grid gap-4 ${profileId ? 'lg:grid-cols-12' : ''}`}>
-        <Card className={`overflow-hidden ${profileId ? 'lg:col-span-7' : ''}`}>
+      {/* Main grid: Data table + optional profile drawer + collapsible Tag Management Sidebar */}
+      <div className={`grid gap-4 items-start ${profileId || tagSidebarOpen ? 'lg:grid-cols-12' : ''}`}>
+        <Card className={`overflow-hidden ${profileId && tagSidebarOpen ? 'lg:col-span-6' : profileId ? 'lg:col-span-7' : tagSidebarOpen ? 'lg:col-span-8' : ''}`}>
           {subsQuery.isLoading ? (
             <div className="p-4 space-y-2">
               <Skeleton className="h-9 w-full" />
@@ -679,7 +721,204 @@ export function SubscribersSection({
             ) : null}
           </Card>
         )}
+
+        {/* Contextual Right-Side Tag Management Sidebar (Desktop) */}
+        {tagSidebarOpen && (
+          <Card className={`hidden lg:flex flex-col p-4 space-y-3 ${profileId ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] pb-2.5">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text)]">
+                <Tag className="h-3.5 w-3.5 text-[var(--color-brand)]" />
+                Tag Management
+              </div>
+              <Button size="icon" variant="ghost" onClick={() => setTagSidebarOpen(false)} aria-label="Close tags sidebar">
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+              <Input
+                className="h-8 pl-8 text-xs"
+                placeholder="Search central tags..."
+                value={tagSidebarSearch}
+                onChange={(e) => setTagSidebarSearch(e.target.value)}
+              />
+            </div>
+
+            <div className="text-[11px] text-[var(--color-text-muted)]">
+              {selectedIds.size > 0
+                ? `${selectedIds.size} subscriber(s) selected for tagging`
+                : 'Select subscribers in the table to apply or remove checked tags.'}
+            </div>
+
+            <div className="max-h-72 overflow-y-auto space-y-1 pr-1">
+              {tags
+                .filter((t) => !tagSidebarSearch.trim() || t.name.toLowerCase().includes(tagSidebarSearch.trim().toLowerCase()))
+                .map((t) => {
+                  const checked = sidebarSelectedTagIds.has(t.id);
+                  const singleSub =
+                    profileQuery.data?.subscriber ??
+                    (selectedIds.size === 1 ? subscribers.find((s) => selectedIds.has(s.id)) : undefined);
+                  const hasTagOnSingle = singleSub?.tags.some((st) => st.toLowerCase() === t.name.toLowerCase());
+                  return (
+                    <div
+                      key={t.id}
+                      className={`flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-xs ${
+                        checked
+                          ? 'border-[var(--color-brand)] bg-[var(--color-brand-soft)]/50'
+                          : 'border-[var(--color-border)] bg-[var(--color-surface)]'
+                      }`}
+                    >
+                      <label className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const next = new Set(sidebarSelectedTagIds);
+                            if (checked) next.delete(t.id);
+                            else next.add(t.id);
+                            setSidebarSelectedTagIds(next);
+                          }}
+                        />
+                        <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: t.color }} />
+                        <span className="truncate font-medium text-[var(--color-text)]">{t.name}</span>
+                        {hasTagOnSingle && <Check className="h-3 w-3 text-emerald-500 shrink-0" />}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClearInitialTag?.();
+                          setTagFilter(t.name);
+                          setPage(1);
+                        }}
+                        className="text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-brand)] cursor-pointer shrink-0"
+                        title={`Filter subscribers by ${t.name}`}
+                      >
+                        {t.subscriberCount}
+                      </button>
+                    </div>
+                  );
+                })}
+              {tags.length === 0 && (
+                <p className="text-xs text-[var(--color-text-muted)] py-3 text-center">No tags created yet.</p>
+              )}
+            </div>
+
+            <div className="space-y-1.5 border-t border-[var(--color-border)] pt-2.5">
+              <Button
+                size="sm"
+                className="w-full"
+                disabled={selectedIds.size === 0 || sidebarSelectedTagIds.size === 0 || sidebarBusy}
+                onClick={() => void handleSidebarTagBatch('add_tag')}
+              >
+                Apply to Selected ({selectedIds.size})
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="w-full"
+                disabled={selectedIds.size === 0 || sidebarSelectedTagIds.size === 0 || sidebarBusy}
+                onClick={() => void handleSidebarTagBatch('remove_tag')}
+              >
+                Remove from Selected ({selectedIds.size})
+              </Button>
+              {onOpenTagManager && (
+                <Button size="sm" variant="ghost" className="w-full justify-between" onClick={onOpenTagManager}>
+                  <span>Open Central Tag Management</span>
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+          </Card>
+        )}
       </div>
+
+      {/* Responsive Slide-Over Tag Drawer for smaller screens */}
+      {tagSidebarOpen && (
+        <div className="fixed inset-0 z-40 flex justify-end bg-black/40 lg:hidden" onClick={() => setTagSidebarOpen(false)}>
+          <div
+            className="w-80 max-w-[90vw] h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] p-4 flex flex-col gap-3 overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] pb-2.5">
+              <div className="flex items-center gap-1.5 text-sm font-semibold text-[var(--color-text)]">
+                <Tag className="h-4 w-4 text-[var(--color-brand)]" />
+                Tags Sidebar
+              </div>
+              <Button size="icon" variant="ghost" onClick={() => setTagSidebarOpen(false)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <Input
+              className="h-8 text-xs"
+              placeholder="Search tags..."
+              value={tagSidebarSearch}
+              onChange={(e) => setTagSidebarSearch(e.target.value)}
+            />
+            <div className="flex-1 overflow-y-auto space-y-1">
+              {tags
+                .filter((t) => !tagSidebarSearch.trim() || t.name.toLowerCase().includes(tagSidebarSearch.trim().toLowerCase()))
+                .map((t) => {
+                  const checked = sidebarSelectedTagIds.has(t.id);
+                  return (
+                    <label
+                      key={t.id}
+                      className="flex items-center justify-between rounded border border-[var(--color-border)] px-2.5 py-2 text-xs cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const next = new Set(sidebarSelectedTagIds);
+                            if (checked) next.delete(t.id);
+                            else next.add(t.id);
+                            setSidebarSelectedTagIds(next);
+                          }}
+                        />
+                        <span>{t.name}</span>
+                      </span>
+                      <span className="text-[var(--color-text-muted)]">{t.subscriberCount}</span>
+                    </label>
+                  );
+                })}
+            </div>
+            <div className="space-y-2 border-t border-[var(--color-border)] pt-3">
+              <Button
+                size="sm"
+                className="w-full"
+                disabled={selectedIds.size === 0 || sidebarSelectedTagIds.size === 0 || sidebarBusy}
+                onClick={() => void handleSidebarTagBatch('add_tag')}
+              >
+                Apply to Selected ({selectedIds.size})
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="w-full"
+                disabled={selectedIds.size === 0 || sidebarSelectedTagIds.size === 0 || sidebarBusy}
+                onClick={() => void handleSidebarTagBatch('remove_tag')}
+              >
+                Remove from Selected ({selectedIds.size})
+              </Button>
+              {onOpenTagManager && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="w-full justify-between"
+                  onClick={() => {
+                    setTagSidebarOpen(false);
+                    onOpenTagManager();
+                  }}
+                >
+                  <span>Central Tag Management</span>
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add Subscriber Modal */}
       <AppDialog open={addOpen} onOpenChange={setAddOpen} title="Add Subscriber">

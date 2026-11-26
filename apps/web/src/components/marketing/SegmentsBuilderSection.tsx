@@ -5,6 +5,7 @@ import { Filter, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '../../lib/api.js';
+import { useCentralTags } from './TagSelector.js';
 
 const FIELD_OPTIONS = [
   { value: 'tags', label: 'Tag Membership' },
@@ -59,6 +60,7 @@ export function SegmentsBuilderSection() {
 
   const segmentsQuery = useQuery({ queryKey: ['segments'], queryFn: () => api.listSegments() });
   const customFieldsQuery = useQuery({ queryKey: ['custom-fields'], queryFn: () => api.listCustomFields() });
+  const { tags: centralTags } = useCentralTags();
 
   const previewMutation = useMutation({
     mutationFn: () => api.previewSegment({ matchType, conditions: rules }),
@@ -201,13 +203,34 @@ export function SegmentsBuilderSection() {
                 </div>
 
                 <div className="sm:col-span-3">
-                  <Input
-                    placeholder="Value..."
-                    value={Array.isArray(rule.value) ? rule.value.join(',') : String(rule.value ?? '')}
-                    onChange={(e) =>
-                      setRules((prev) => prev.map((r, i) => (i === idx ? { ...r, value: e.target.value } : r)))
-                    }
-                  />
+                  {rule.field === 'tags' && (rule.operator === 'has_tag' || rule.operator === 'not_has_tag') && centralTags.length > 0 ? (
+                    <select
+                      aria-label="Segment tag filter"
+                      className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-[var(--color-text)]"
+                      value={String(rule.value ?? '')}
+                      onChange={(e) =>
+                        setRules((prev) => prev.map((r, i) => (i === idx ? { ...r, value: e.target.value } : r)))
+                      }
+                    >
+                      <option value="">Select tag...</option>
+                      {centralTags.map((t) => (
+                        <option key={t.id} value={t.name}>
+                          {t.name} ({t.subscriberCount})
+                        </option>
+                      ))}
+                      {Boolean(rule.value) && !centralTags.some((t) => t.name === String(rule.value)) && (
+                        <option value={String(rule.value)}>{String(rule.value)}</option>
+                      )}
+                    </select>
+                  ) : (
+                    <Input
+                      placeholder={rule.field === 'tags' ? 'Comma-separated tag names...' : 'Value...'}
+                      value={Array.isArray(rule.value) ? rule.value.join(',') : String(rule.value ?? '')}
+                      onChange={(e) =>
+                        setRules((prev) => prev.map((r, i) => (i === idx ? { ...r, value: e.target.value } : r)))
+                      }
+                    />
+                  )}
                 </div>
 
                 <div className="sm:col-span-1 flex justify-end">

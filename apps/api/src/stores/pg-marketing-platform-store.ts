@@ -1369,6 +1369,7 @@ export class PgMarketingPlatformStore implements MarketingStore {
       completedAt: isoOrNull(r.completed_at),
       failureReason: (r.failure_reason as string | null) ?? null,
       createdAt: iso(r.created_at),
+      updatedAt: r.updated_at ? iso(r.updated_at) : iso(r.created_at),
     };
   }
 
@@ -1377,7 +1378,7 @@ export class PgMarketingPlatformStore implements MarketingStore {
       `SELECT id::text, organization_id::text, domain_id::text, template_version_id::text, name,
               status, from_name, from_email, reply_to, subject, preview_text, html_body, text_body,
               blocks_json, audience_spec, timezone, scheduled_at, dispatched_at, completed_at,
-              failure_reason, target_filter, stats_cache, created_at
+              failure_reason, target_filter, stats_cache, created_at, updated_at
          FROM campaigns WHERE organization_id = $1 ORDER BY created_at DESC`,
       [orgId]
     );
@@ -1459,7 +1460,7 @@ export class PgMarketingPlatformStore implements MarketingStore {
        RETURNING id::text, organization_id::text, domain_id::text, template_version_id::text, name,
                  status, from_name, from_email, reply_to, subject, preview_text, html_body, text_body,
                  blocks_json, audience_spec, timezone, scheduled_at, dispatched_at, completed_at,
-                 failure_reason, target_filter, stats_cache, created_at`,
+                 failure_reason, target_filter, stats_cache, created_at, updated_at`,
       [
         id,
         input.organizationId,
@@ -1504,13 +1505,24 @@ export class PgMarketingPlatformStore implements MarketingStore {
       timezone: string;
       scheduledAt: string | null;
       status: CampaignRecord['status'];
+      expectedUpdatedAt?: string | undefined;
     }>
   ): Promise<CampaignRecord | null> {
     if (!UUID_RX.test(id)) return null;
     const existing = (await this.listCampaigns(orgId)).find((c) => c.id === id);
     if (!existing) return null;
-    if (existing.status === 'completed' || existing.status === 'sending' || existing.status === 'running') {
-      throw new AppError(400, 'CAMPAIGN_LOCKED', 'Cannot edit a campaign after sending has started');
+    if (
+      existing.status === 'completed' ||
+      existing.status === 'sending' ||
+      existing.status === 'running' ||
+      existing.status === 'cancelled'
+    ) {
+      throw new AppError(409, 'CAMPAIGN_LOCKED', `Cannot edit a ${existing.status} broadcast`);
+    }
+    if (patch.expectedUpdatedAt && existing.updatedAt && patch.expectedUpdatedAt !== existing.updatedAt) {
+      throw new AppError(409, 'DRAFT_CONFLICT', 'Broadcast draft was modified in another session', {
+        latestCampaign: existing,
+      });
     }
 
     let nextTargetCount = existing.targetCount;
@@ -1540,7 +1552,7 @@ export class PgMarketingPlatformStore implements MarketingStore {
        RETURNING id::text, organization_id::text, domain_id::text, template_version_id::text, name,
                  status, from_name, from_email, reply_to, subject, preview_text, html_body, text_body,
                  blocks_json, audience_spec, timezone, scheduled_at, dispatched_at, completed_at,
-                 failure_reason, target_filter, stats_cache, created_at`,
+                 failure_reason, target_filter, stats_cache, created_at, updated_at`,
       [
         orgId,
         id,
@@ -1570,6 +1582,30 @@ export class PgMarketingPlatformStore implements MarketingStore {
     return res.rows[0] ? this.mapCampaignRow(res.rows[0]) : null;
   }
 
+  async duplicateCampaign(orgId: string, id: string): Promise<CampaignRecord | null> {
+    if (!UUID_RX.test(id)) return null;
+    const existing = (await this.listCampaigns(orgId)).find((c) => c.id === id);
+    if (!existing) return null;
+    return this.createCampaign({
+      organizationId: orgId,
+      domainId: existing.domainId,
+      templateId: existing.templateId,
+      name: `${existing.name} (Copy)`,
+      ...(existing.fromName ? { fromName: existing.fromName } : {}),
+      fromEmail: existing.fromEmail ?? null,
+      replyTo: existing.replyTo ?? null,
+      subject: existing.subject ?? null,
+      ...(existing.previewText ? { previewText: existing.previewText } : {}),
+      htmlBody: existing.htmlBody ?? null,
+      textBody: existing.textBody ?? null,
+      ...(existing.blocksJson ? { blocksJson: existing.blocksJson } : {}),
+      ...(existing.audienceSpec ? { audienceSpec: existing.audienceSpec } : {}),
+      timezone: existing.timezone,
+      scheduledAt: null,
+      tagFilter: existing.tagFilter ?? null,
+    });
+  }
+
   async deleteCampaign(orgId: string, id: string): Promise<boolean> {
     if (!UUID_RX.test(id)) return false;
     await this.pool.query(`UPDATE messages SET campaign_id = NULL WHERE organization_id = $1 AND campaign_id = $2`, [orgId, id]);
@@ -1593,7 +1629,7 @@ export class PgMarketingPlatformStore implements MarketingStore {
        RETURNING id::text, organization_id::text, domain_id::text, template_version_id::text, name,
                  status, from_name, from_email, reply_to, subject, preview_text, html_body, text_body,
                  blocks_json, audience_spec, timezone, scheduled_at, dispatched_at, completed_at,
-                 failure_reason, target_filter, stats_cache, created_at`,
+                 failure_reason, target_filter, stats_cache, created_at, updated_at`,
       [orgId, id, status]
     );
     return res.rows[0] ? this.mapCampaignRow(res.rows[0]) : null;
@@ -1616,7 +1652,7 @@ export class PgMarketingPlatformStore implements MarketingStore {
        RETURNING id::text, organization_id::text, domain_id::text, template_version_id::text, name,
                  status, from_name, from_email, reply_to, subject, preview_text, html_body, text_body,
                  blocks_json, audience_spec, timezone, scheduled_at, dispatched_at, completed_at,
-                 failure_reason, target_filter, stats_cache, created_at`,
+                 failure_reason, target_filter, stats_cache, created_at, updated_at`,
       [orgId, id, sentCount, failureReason ? 'failed' : 'completed', failureReason ?? null]
     );
     return res.rows[0] ? this.mapCampaignRow(res.rows[0]) : null;
@@ -2255,12 +2291,22 @@ export class PgMarketingPlatformStore implements MarketingStore {
       visited.add(current.id);
       let detail = '';
 
-      if (current.type === 'action_add_tag' && typeof current.config.tagName === 'string') {
-        await this.updateSubscriber(orgId, sub.id, { addTags: [current.config.tagName] });
-        detail = `Added tag ${current.config.tagName}`;
-      } else if (current.type === 'action_remove_tag' && typeof current.config.tagName === 'string') {
-        await this.updateSubscriber(orgId, sub.id, { removeTags: [current.config.tagName] });
-        detail = `Removed tag ${current.config.tagName}`;
+      const orgTags = await this.listTags(orgId);
+      const tagMapById = new Map(orgTags.map((t) => [t.id, t.name]));
+      const resolveConfigTag = (conf: Record<string, unknown>): string | null => {
+        if (typeof conf.tagId === 'string' && tagMapById.has(conf.tagId)) {
+          return tagMapById.get(conf.tagId)!;
+        }
+        return typeof conf.tagName === 'string' && conf.tagName ? conf.tagName : null;
+      };
+      const tagTarget = resolveConfigTag(current.config);
+
+      if (current.type === 'action_add_tag' && tagTarget) {
+        await this.updateSubscriber(orgId, sub.id, { addTags: [tagTarget] });
+        detail = `Added tag ${tagTarget}`;
+      } else if (current.type === 'action_remove_tag' && tagTarget) {
+        await this.updateSubscriber(orgId, sub.id, { removeTags: [tagTarget] });
+        detail = `Removed tag ${tagTarget}`;
       } else if (current.type === 'action_update_field' && typeof current.config.fieldKey === 'string') {
         await this.updateSubscriber(orgId, sub.id, { attributes: { [current.config.fieldKey]: String(current.config.value ?? '') } });
         detail = `Updated ${current.config.fieldKey}`;
@@ -2300,10 +2346,10 @@ export class PgMarketingPlatformStore implements MarketingStore {
       );
 
       let nextEdge = automation.edges.find((e) => e.source === current!.id && (!e.branch || e.branch === 'next'));
-      if (current.type === 'condition' && typeof current.config.tagName === 'string') {
+      if (current.type === 'condition' && tagTarget) {
         const latest = await this.pool.query(`SELECT tags FROM contacts WHERE id = $1`, [sub.id]);
         const curTags: string[] = latest.rows[0]?.tags ?? sub.tags;
-        const hasTag = curTags.some((t) => t.toLowerCase() === String(current!.config.tagName).toLowerCase());
+        const hasTag = curTags.some((t) => t.toLowerCase() === tagTarget.toLowerCase());
         nextEdge = automation.edges.find((e) => e.source === current!.id && e.branch === (hasTag ? 'yes' : 'no'));
       }
       current = nextEdge ? automation.nodes.find((n) => n.id === nextEdge.target) : undefined;
@@ -2348,13 +2394,18 @@ export class PgMarketingPlatformStore implements MarketingStore {
     ]);
     if ((subRes.rowCount ?? 0) === 0) return 0;
     const sub = this.mapSubscriberRow(subRes.rows[0]);
+    const orgTags = await this.listTags(orgId);
+    const tagMapById = new Map(orgTags.map((t) => [t.id, t.name]));
     let launched = 0;
     for (const a of autos) {
       if (a.status !== 'published' || a.triggerType !== triggerType) continue;
-      if (triggerType === 'tag_added' && a.triggerConfig.tagName) {
-        const expected = String(a.triggerConfig.tagName).toLowerCase();
+      if (triggerType === 'tag_added' && (a.triggerConfig.tagId || a.triggerConfig.tagName)) {
+        const expectedById =
+          typeof a.triggerConfig.tagId === 'string' ? tagMapById.get(a.triggerConfig.tagId) : undefined;
+        const expected = String(expectedById ?? a.triggerConfig.tagName ?? '').toLowerCase();
         const actual = String(context?.tagName ?? '').toLowerCase();
-        if (actual && actual !== expected) continue;
+        if (expected && actual && actual !== expected) continue;
+        if (a.triggerConfig.tagId && context?.tagId && a.triggerConfig.tagId !== context.tagId) continue;
       }
       await this.executeAutomationRun(orgId, a, sub);
       launched += 1;

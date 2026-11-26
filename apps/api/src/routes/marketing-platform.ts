@@ -166,14 +166,33 @@ export function createMarketingPlatformRouter(deps: {
 
   router.post('/subscribers/bulk', auth, requireOrgRole(['owner', 'admin', 'developer']), async (req, res) => {
     if (!deps.store.bulkSubscribersAction) throw new AppError(501, 'NOT_SUPPORTED', 'Bulk actions unavailable');
+    const orgId = req.auth!.orgId!;
     const body = z
       .object({
         ids: z.array(z.string().min(1)).min(1).max(2000),
         action: z.enum(['add_tag', 'remove_tag', 'unsubscribe', 'delete']),
+        tagId: z.string().min(1).optional(),
         tagName: z.string().trim().min(1).max(64).optional(),
       })
       .parse(req.body);
-    const result = await deps.store.bulkSubscribersAction(req.auth!.orgId!, body.ids, body.action, body.tagName);
+    let resolvedTagName = body.tagName;
+    if (body.tagId && deps.store.listTags) {
+      const tags = await deps.store.listTags(orgId);
+      const found = tags.find((t) => t.id === body.tagId);
+      if (!found) throw new AppError(404, 'TAG_NOT_FOUND', 'Selected tag not found');
+      resolvedTagName = found.name;
+    }
+    const result = await deps.store.bulkSubscribersAction(orgId, body.ids, body.action, resolvedTagName);
+    if (body.action === 'add_tag' && resolvedTagName && deps.store.triggerAutomationForSubscriber) {
+      for (const subId of body.ids) {
+        await Promise.resolve(
+          deps.store.triggerAutomationForSubscriber(orgId, 'tag_added', subId, {
+            ...(body.tagId ? { tagId: body.tagId } : {}),
+            tagName: resolvedTagName,
+          })
+        ).catch(() => 0);
+      }
+    }
     res.json(result);
   });
 

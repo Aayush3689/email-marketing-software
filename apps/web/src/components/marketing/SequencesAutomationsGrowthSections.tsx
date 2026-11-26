@@ -26,6 +26,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '../../lib/api.js';
 import { stripHtmlToText } from './VisualEmailEditor.js';
+import { TagMultiSelect, TagSingleSelect, useCentralTags } from './TagSelector.js';
 
 // ============================================================================
 // 1. EMAIL SEQUENCES (DRIP WORKFLOWS)
@@ -166,29 +167,31 @@ export function SequencesSection() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-[var(--fg-primary)]">Automated Email Sequences</h2>
-          <p className="text-xs text-[var(--fg-muted)]">
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">Automated Email Sequences</h3>
+          <p className="text-xs text-[var(--color-text-muted)]">
             Multi-step drip series executed automatically on schedule by the background sequence processor.
           </p>
         </div>
         <Button onClick={openNew}>
-          <Plus className="mr-1.5 h-4 w-4" /> New Sequence
+          <Plus className="h-4 w-4" /> New Sequence
         </Button>
       </div>
 
       {sequencesQuery.isLoading ? (
         <Skeleton className="h-32 w-full" />
       ) : sequences.length === 0 ? (
-        <EmptyState
-          icon={<ListOrdered className="h-5 w-5" />}
-          title="No email sequences yet"
-          description="Create an onboarding or nurture series with custom day/hour delays between emails."
-          action={
-            <Button onClick={openNew}>
-              <Plus className="mr-1.5 h-4 w-4" /> Create First Sequence
-            </Button>
-          }
-        />
+        <Card>
+          <EmptyState
+            icon={<ListOrdered className="h-5 w-5" />}
+            title="No email sequences yet"
+            description="Create an onboarding or nurture series with custom day/hour delays between emails."
+            action={
+              <Button onClick={openNew}>
+                <Plus className="h-4 w-4" /> Create First Sequence
+              </Button>
+            }
+          />
+        </Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {sequences.map((seq) => (
@@ -196,39 +199,45 @@ export function SequencesSection() {
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-semibold text-[var(--fg-primary)]">{seq.name}</h3>
+                    <h4 className="text-sm font-semibold text-[var(--color-text)]">{seq.name}</h4>
                     <Badge tone={seq.enabled ? 'success' : 'neutral'}>
                       {seq.enabled ? 'Active' : 'Paused'}
                     </Badge>
                   </div>
-                  <p className="text-xs text-[var(--fg-muted)] mt-0.5">
+                  <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
                     {seq.steps.length} step{seq.steps.length === 1 ? '' : 's'} • {seq.enrolledCount} active enrollment
                     {seq.enrolledCount === 1 ? '' : 's'}
                   </p>
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1">
                   <Button size="sm" variant="secondary" onClick={() => setEnrollTarget(seq)}>
                     Enrollments
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => openEdit(seq)}>
                     Edit
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={() => deleteMutation.mutate(seq.id)}>
-                    <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => deleteMutation.mutate(seq.id)}
+                    aria-label={`Delete ${seq.name}`}
+                    className="text-[var(--color-danger)] hover:text-[var(--color-danger)]"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               </div>
-              {seq.description && <p className="text-xs text-[var(--fg-secondary)]">{seq.description}</p>}
+              {seq.description && <p className="text-xs text-[var(--color-text-muted)]">{seq.description}</p>}
               <div className="space-y-1">
                 {seq.steps.slice(0, 3).map((st) => (
                   <div
                     key={st.id}
-                    className="flex items-center justify-between rounded bg-[var(--bg-subtle)] px-2.5 py-1 text-xs"
+                    className="flex items-center justify-between rounded bg-[var(--color-surface-muted)] px-2.5 py-1 text-xs"
                   >
-                    <span className="truncate font-medium text-[var(--fg-primary)]">
+                    <span className="truncate font-medium text-[var(--color-text)]">
                       #{st.position}: {st.subject}
                     </span>
-                    <span className="shrink-0 text-[var(--fg-muted)]">
+                    <span className="shrink-0 text-[var(--color-text-muted)]">
                       +{st.delayDays}d {st.delayHours}h
                     </span>
                   </div>
@@ -239,28 +248,27 @@ export function SequencesSection() {
         </div>
       )}
 
-      {/* Sequence Editor Dialog */}
       <AppDialog
         open={editorOpen}
         onOpenChange={setEditorOpen}
         title={editingId ? 'Edit Email Sequence' : 'Create Email Sequence'}
         maxWidthClass="max-w-3xl"
       >
-        <div className="max-h-[78vh] overflow-y-auto space-y-4 pr-1">
-          <p className="text-xs text-[var(--fg-muted)]">
+        <div className="max-h-[80vh] overflow-y-auto space-y-4 pr-1">
+          <p className="text-xs text-[var(--color-text-muted)]">
             Configure sender identity, drip delays, and personalized step emails.
           </p>
           <div className="grid gap-3 md:grid-cols-2">
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Sequence Name</label>
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Sequence Name</label>
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. 5-Day Onboarding" />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Verified Sending Domain</label>
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Verified Sending Domain</label>
               <select
                 value={domainId}
                 onChange={(e) => setDomainId(e.target.value)}
-                className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-sm text-[var(--fg-primary)]"
+                className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
               >
                 <option value="">Select domain...</option>
                 {verifiedDomains.map((d) => (
@@ -271,16 +279,16 @@ export function SequencesSection() {
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">From Name</label>
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">From Name</label>
               <Input value={fromName} onChange={(e) => setFromName(e.target.value)} placeholder="FastConnect Team" />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">From Email</label>
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">From Email</label>
               <Input value={fromEmail} onChange={(e) => setFromEmail(e.target.value)} placeholder="hello@yourdomain.com" />
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-6 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-3 text-xs">
             <label className="flex items-center gap-2">
               <AppSwitch checked={enabled} onCheckedChange={setEnabled} />
               <span>Sequence Enabled</span>
@@ -297,7 +305,7 @@ export function SequencesSection() {
 
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wide text-[var(--fg-muted)]">
+              <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
                 Sequence Emails ({steps.length})
               </span>
               <Button
@@ -320,16 +328,16 @@ export function SequencesSection() {
                   ])
                 }
               >
-                <Plus className="mr-1 h-3.5 w-3.5" /> Add Email Step
+                <Plus className="h-3.5 w-3.5" /> Add Email Step
               </Button>
             </div>
 
             {steps.map((st, idx) => (
               <Card key={st.id} className="p-3 space-y-2">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-[var(--fg-primary)]">Email #{idx + 1}</span>
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-1 text-xs">
+                  <span className="text-xs font-semibold text-[var(--color-text)]">Email #{idx + 1}</span>
+                  <div className="flex items-center gap-2 text-xs">
+                    <label className="flex items-center gap-1">
                       Days:
                       <input
                         type="number"
@@ -340,10 +348,10 @@ export function SequencesSection() {
                             prev.map((x, i) => (i === idx ? { ...x, delayDays: Number(e.target.value) } : x))
                           )
                         }
-                        className="w-16 rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+                        className="w-16 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs"
                       />
                     </label>
-                    <label className="flex items-center gap-1 text-xs">
+                    <label className="flex items-center gap-1">
                       Hours:
                       <input
                         type="number"
@@ -355,15 +363,16 @@ export function SequencesSection() {
                             prev.map((x, i) => (i === idx ? { ...x, delayHours: Number(e.target.value) } : x))
                           )
                         }
-                        className="w-16 rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-xs"
+                        className="w-16 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-xs"
                       />
                     </label>
                     <Button
-                      size="sm"
-                      variant="secondary"
+                      size="icon"
+                      variant="ghost"
+                      className="text-[var(--color-danger)] hover:text-[var(--color-danger)]"
                       onClick={() => setSteps((prev) => prev.filter((_, i) => i !== idx))}
                     >
-                      <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                      <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   </div>
                 </div>
@@ -384,13 +393,13 @@ export function SequencesSection() {
                       )
                     )
                   }
-                  className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] p-2 font-mono text-xs text-[var(--fg-primary)]"
+                  className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-2 font-mono text-xs text-[var(--color-text)]"
                 />
               </Card>
             ))}
           </div>
 
-          <div className="flex justify-end gap-2 border-t border-[var(--border-subtle)] pt-3">
+          <div className="flex justify-end gap-2 border-t border-[var(--color-border)] pt-3">
             <Button variant="secondary" onClick={() => setEditorOpen(false)}>
               Cancel
             </Button>
@@ -401,7 +410,6 @@ export function SequencesSection() {
         </div>
       </AppDialog>
 
-      {/* Enrollments Drawer/Dialog */}
       <AppDialog
         open={Boolean(enrollTarget)}
         onOpenChange={(open) => {
@@ -410,14 +418,14 @@ export function SequencesSection() {
         title={`Enrollments: ${enrollTarget?.name ?? ''}`}
       >
         <div className="space-y-4">
-          <p className="text-xs text-[var(--fg-muted)]">
+          <p className="text-xs text-[var(--color-text-muted)]">
             Manually enroll a subscriber or inspect active progression.
           </p>
           <div className="flex gap-2">
             <select
               value={enrollSubscriberId}
               onChange={(e) => setEnrollSubscriberId(e.target.value)}
-              className="flex-1 rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-sm text-[var(--fg-primary)]"
+              className="h-9 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
             >
               <option value="">Select subscribed contact...</option>
               {(subscribersQuery.data?.subscribers ?? []).map((s) => (
@@ -436,16 +444,16 @@ export function SequencesSection() {
 
           <div className="max-h-64 overflow-y-auto space-y-1.5">
             {(enrollmentsQuery.data?.enrollments ?? []).length === 0 ? (
-              <p className="text-xs text-[var(--fg-muted)]">No enrollments yet.</p>
+              <p className="text-xs text-[var(--color-text-muted)]">No enrollments yet.</p>
             ) : (
               (enrollmentsQuery.data?.enrollments ?? []).map((en) => (
                 <div
                   key={en.id}
-                  className="flex items-center justify-between rounded border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3 py-2 text-xs"
+                  className="flex items-center justify-between rounded border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 text-xs"
                 >
                   <div>
-                    <div className="font-medium text-[var(--fg-primary)]">{en.subscriberEmail}</div>
-                    <div className="text-[11px] text-[var(--fg-muted)]">
+                    <div className="font-medium text-[var(--color-text)]">{en.subscriberEmail}</div>
+                    <div className="text-[11px] text-[var(--color-text-muted)]">
                       Step index: {en.currentStepIndex} • Enrolled {new Date(en.enrolledAt).toLocaleString()}
                     </div>
                   </div>
@@ -466,35 +474,57 @@ export function SequencesSection() {
 // 2. VISUAL AUTOMATIONS BUILDER + ACTIVITY LOGS
 // ============================================================================
 
-const TRIGGER_OPTIONS: Array<{ value: AutomationTriggerType; label: string }> = [
-  { value: 'tag_added', label: 'When a Tag is Added' },
-  { value: 'form_submitted', label: 'When a Form is Submitted' },
-  { value: 'landing_page_signup', label: 'Landing Page Signup' },
-  { value: 'segment_joined', label: 'Subscriber Joins Segment' },
-  { value: 'api_event', label: 'Custom API / Manual Trigger' },
+const TRIGGER_OPTIONS: Array<{ value: AutomationTriggerType; label: string; help: string }> = [
+  {
+    value: 'tag_added',
+    label: 'When a Tag is Added',
+    help: 'Triggers whenever the chosen tag is applied manually, via CSV import, form signup, or API.',
+  },
+  {
+    value: 'form_submitted',
+    label: 'When a Form is Submitted',
+    help: 'Triggers immediately after a visitor submits one of your published signup forms.',
+  },
+  {
+    value: 'landing_page_signup',
+    label: 'Landing Page Signup',
+    help: 'Triggers when a new subscriber signs up through a hosted landing page.',
+  },
+  {
+    value: 'segment_joined',
+    label: 'Subscriber Joins Segment',
+    help: 'Triggers when a subscriber matches the selected dynamic segment.',
+  },
+  {
+    value: 'api_event',
+    label: 'Custom API / Manual Trigger',
+    help: 'Triggered programmatically via API or manually tested from this dashboard.',
+  },
 ];
 
 const NODE_OPTIONS: Array<{ value: AutomationNodeType; label: string }> = [
-  { value: 'condition', label: 'Condition (If / Else)' },
+  { value: 'condition', label: 'Condition (If Tag)' },
   { value: 'delay', label: 'Delay / Wait' },
-  { value: 'action_add_tag', label: 'Action: Add Tag' },
-  { value: 'action_remove_tag', label: 'Action: Remove Tag' },
-  { value: 'action_subscribe_sequence', label: 'Action: Enroll Sequence' },
-  { value: 'action_unsubscribe_sequence', label: 'Action: Exit Sequence' },
-  { value: 'action_update_field', label: 'Action: Update Field' },
+  { value: 'action_add_tag', label: 'Add Tag' },
+  { value: 'action_remove_tag', label: 'Remove Tag' },
+  { value: 'action_subscribe_sequence', label: 'Enroll Sequence' },
+  { value: 'action_unsubscribe_sequence', label: 'Exit Sequence' },
+  { value: 'action_update_field', label: 'Update Field' },
   { value: 'end', label: 'End Flow' },
 ];
 
 export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'builder' | 'activity' }) {
   const qc = useQueryClient();
+  const { byId: tagById } = useCentralTags();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState('');
   const [newTrigger, setNewTrigger] = useState<AutomationTriggerType>('tag_added');
-  const [newTagName, setNewTagName] = useState('');
+  const [newTriggerTagId, setNewTriggerTagId] = useState('');
+  const [newTriggerTagName, setNewTriggerTagName] = useState('');
+  const [newTriggerFormId, setNewTriggerFormId] = useState('');
+  const [newTriggerSegmentId, setNewTriggerSegmentId] = useState('');
   const [testSubId, setTestSubId] = useState('');
-
-  // Node editing modal state
   const [editNode, setEditNode] = useState<AutomationNode | null>(null);
 
   const automationsQuery = useQuery({ queryKey: ['automations'], queryFn: () => api.listAutomations() });
@@ -502,8 +532,9 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
     queryKey: ['automation-runs', selectedId],
     queryFn: () => api.listAutomationRuns(selectedId ?? undefined),
   });
-  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: () => api.listTags() });
   const sequencesQuery = useQuery({ queryKey: ['sequences'], queryFn: () => api.listSequences() });
+  const formsQuery = useQuery({ queryKey: ['forms'], queryFn: () => api.listForms() });
+  const segmentsQuery = useQuery({ queryKey: ['segments'], queryFn: () => api.listSegments() });
   const subscribersQuery = useQuery({
     queryKey: ['subscribers', 'auto-test'],
     queryFn: () => api.listSubscribers({ pageSize: 100 }),
@@ -512,32 +543,51 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
   const automations = automationsQuery.data?.automations ?? [];
   const activeAutomation = automations.find((a) => a.id === selectedId) ?? automations[0] ?? null;
 
+  const triggerMeta = TRIGGER_OPTIONS.find((t) => t.value === newTrigger) ?? TRIGGER_OPTIONS[0]!;
+  const isCreateTriggerValid =
+    Boolean(newName.trim()) &&
+    (newTrigger !== 'tag_added' || Boolean(newTriggerTagId)) &&
+    (newTrigger !== 'form_submitted' || Boolean(newTriggerFormId)) &&
+    (newTrigger !== 'segment_joined' || Boolean(newTriggerSegmentId));
+
   const createMutation = useMutation({
     mutationFn: () => {
+      const triggerConfig: Record<string, unknown> =
+        newTrigger === 'tag_added'
+          ? { tagId: newTriggerTagId, tagName: newTriggerTagName }
+          : newTrigger === 'form_submitted'
+            ? { formId: newTriggerFormId }
+            : newTrigger === 'segment_joined'
+              ? { segmentId: newTriggerSegmentId }
+              : {};
+
       const triggerNode: AutomationNode = {
         id: 'node_trigger',
         type: 'trigger',
-        label: TRIGGER_OPTIONS.find((t) => t.value === newTrigger)?.label ?? 'Trigger',
+        label:
+          newTrigger === 'tag_added' && newTriggerTagName
+            ? `Tag Added: ${newTriggerTagName}`
+            : triggerMeta.label,
         x: 60,
         y: 60,
-        config: newTagName ? { tagName: newTagName } : {},
+        config: triggerConfig,
       };
-      const actionNode: AutomationNode = {
-        id: 'node_step_1',
-        type: 'action_add_tag',
-        label: 'Tag as Engaged',
+      const endNode: AutomationNode = {
+        id: 'node_end',
+        type: 'end',
+        label: 'Complete Workflow',
         x: 300,
         y: 60,
-        config: { tagName: 'engaged' },
+        config: {},
       };
-      const edge: AutomationEdge = { id: 'edge_1', source: 'node_trigger', target: 'node_step_1', branch: 'next' };
+      const edge: AutomationEdge = { id: 'edge_1', source: 'node_trigger', target: 'node_end', branch: 'next' };
       return api.createAutomation({
-        name: newName,
-        description: '',
+        name: newName.trim(),
+        description: triggerMeta.help,
         status: 'draft',
         triggerType: newTrigger,
-        triggerConfig: newTagName ? { tagName: newTagName } : {},
-        nodes: [triggerNode, actionNode],
+        triggerConfig,
+        nodes: [triggerNode, endNode],
         edges: [edge],
       });
     },
@@ -546,6 +596,8 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
       setSelectedId(res.automation.id);
       setCreateOpen(false);
       setNewName('');
+      setNewTriggerTagId('');
+      setNewTriggerTagName('');
       qc.invalidateQueries({ queryKey: ['automations'] });
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Failed to create automation'),
@@ -590,7 +642,7 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
       label: NODE_OPTIONS.find((n) => n.value === type)?.label ?? type,
       x: (prevNode?.x ?? 60) + 220,
       y: prevNode?.y ?? 60,
-      config: type === 'delay' ? { delayMinutes: 60 } : {},
+      config: type === 'delay' ? { delayHours: 24 } : {},
     };
     const nextNodes = [...activeAutomation.nodes, newNode];
     const nextEdges = prevNode
@@ -615,35 +667,59 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
     });
   };
 
+  const formatNodeSummary = (node: AutomationNode) => {
+    const tagId = typeof node.config.tagId === 'string' ? node.config.tagId : '';
+    if (tagId) {
+      const tag = tagById.get(tagId);
+      return tag ? `Tag: ${tag.name}` : `Removed Tag (${String(node.config.tagName ?? 'deleted')})`;
+    }
+    if (typeof node.config.tagName === 'string' && node.config.tagName) {
+      return `Tag: ${node.config.tagName}`;
+    }
+    if (node.type === 'delay') {
+      return `Wait ${String(node.config.delayHours ?? 24)} hour(s)`;
+    }
+    if (typeof node.config.sequenceId === 'string' && node.config.sequenceId) {
+      const seq = (sequencesQuery.data?.sequences ?? []).find((s) => s.id === node.config.sequenceId);
+      return seq ? `Sequence: ${seq.name}` : 'Selected sequence';
+    }
+    if (typeof node.config.fieldKey === 'string' && node.config.fieldKey) {
+      return `Set ${node.config.fieldKey} = ${String(node.config.value ?? '')}`;
+    }
+    return 'Click to configure';
+  };
+
   if (initialTab === 'activity') {
     const runs = runsQuery.data?.runs ?? [];
     return (
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-[var(--fg-primary)]">Automation Execution Activity</h2>
-            <p className="text-xs text-[var(--fg-muted)]">
+            <h3 className="text-sm font-semibold text-[var(--color-text)]">Automation Execution Activity</h3>
+            <p className="text-xs text-[var(--color-text-muted)]">
               Live and completed subscriber journeys executed by published automations.
             </p>
           </div>
           <Button size="sm" variant="secondary" onClick={() => runsQuery.refetch()}>
-            <Activity className="mr-1.5 h-3.5 w-3.5" /> Refresh Logs
+            <Activity className="h-3.5 w-3.5" /> Refresh Logs
           </Button>
         </div>
 
         {runs.length === 0 ? (
-          <EmptyState
-            icon={<Activity className="h-5 w-5" />}
-            title="No automation runs yet"
-            description="Publish an automation and enroll or trigger a subscriber to inspect step-by-step execution."
-          />
+          <Card>
+            <EmptyState
+              icon={<Activity className="h-5 w-5" />}
+              title="No automation runs yet"
+              description="Publish an automation and enroll or trigger a subscriber to inspect step-by-step execution."
+            />
+          </Card>
         ) : (
           <div className="space-y-2">
             {runs.map((r) => (
               <Card key={r.id} className="flex flex-wrap items-center justify-between gap-3 p-3 text-xs">
                 <div>
-                  <div className="font-medium text-[var(--fg-primary)]">{r.subscriberEmail}</div>
-                  <div className="text-[var(--fg-muted)]">
+                  <div className="font-medium text-[var(--color-text)]">{r.subscriberEmail}</div>
+                  <div className="text-[var(--color-text-muted)]">
                     Current Node: <code>{r.currentNodeId ?? 'completed'}</code> • Started{' '}
                     {new Date(r.startedAt).toLocaleString()}
                   </div>
@@ -663,62 +739,64 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-[var(--fg-primary)]">Visual Automation Workflows</h2>
-          <p className="text-xs text-[var(--fg-muted)]">
-            Connect triggers, delays, conditions, tags, and sequences in one visual flow executed asynchronously.
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">Visual Automation Workflows</h3>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Connect entry triggers, delays, tag rules, and sequences using your centralized tag directory.
           </p>
         </div>
         <Button onClick={() => setCreateOpen(true)}>
-          <Plus className="mr-1.5 h-4 w-4" /> New Visual Automation
+          <Plus className="h-4 w-4" /> New Visual Automation
         </Button>
       </div>
 
       {automationsQuery.isLoading ? (
         <Skeleton className="h-44 w-full" />
       ) : automations.length === 0 ? (
-        <EmptyState
-          icon={<Workflow className="h-5 w-5" />}
-          title="No visual automations yet"
-          description="Build trigger-to-action journeys when subscribers receive tags, submit forms, or trigger API events."
-          action={
-            <Button onClick={() => setCreateOpen(true)}>
-              <Plus className="mr-1.5 h-4 w-4" /> Create First Automation
-            </Button>
-          }
-        />
+        <Card>
+          <EmptyState
+            icon={<Workflow className="h-5 w-5" />}
+            title="No visual automations yet"
+            description="Build trigger-to-action journeys when subscribers receive tags, submit forms, or join segments."
+            action={
+              <Button onClick={() => setCreateOpen(true)}>
+                <Plus className="h-4 w-4" /> Create First Automation
+              </Button>
+            }
+          />
+        </Card>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
-          {/* Left selector list */}
+        <div className="grid gap-4 lg:grid-cols-[270px_1fr]">
           <div className="space-y-2">
             {automations.map((auto) => (
               <Card
                 key={auto.id}
                 onClick={() => setSelectedId(auto.id)}
                 className={`cursor-pointer p-3 space-y-1 transition-colors ${
-                  activeAutomation?.id === auto.id ? 'border-[var(--accent)] bg-[var(--bg-subtle)]' : ''
+                  activeAutomation?.id === auto.id
+                    ? 'border-[var(--color-brand)] bg-[var(--color-brand-soft)]/40'
+                    : 'hover:border-[var(--color-border-strong)]'
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-[var(--fg-primary)] truncate">{auto.name}</span>
+                  <span className="text-xs font-semibold text-[var(--color-text)] truncate">{auto.name}</span>
                   <Badge tone={auto.status === 'published' ? 'success' : auto.status === 'paused' ? 'warning' : 'neutral'}>
                     {auto.status}
                   </Badge>
                 </div>
-                <div className="text-[11px] text-[var(--fg-muted)]">
-                  Trigger: {auto.triggerType} • Runs: {auto.runCount}
+                <div className="text-[11px] text-[var(--color-text-muted)]">
+                  Trigger: {auto.triggerType.replace('_', ' ')} • Runs: {auto.runCount}
                 </div>
               </Card>
             ))}
           </div>
 
-          {/* Right visual canvas */}
           {activeAutomation && (
             <Card className="p-4 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] pb-3">
                 <div>
-                  <h3 className="text-sm font-semibold text-[var(--fg-primary)]">{activeAutomation.name}</h3>
-                  <p className="text-xs text-[var(--fg-muted)]">
-                    Trigger: {activeAutomation.triggerType} • {activeAutomation.nodes.length} nodes
+                  <h4 className="text-sm font-semibold text-[var(--color-text)]">{activeAutomation.name}</h4>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Trigger: {activeAutomation.triggerType.replace('_', ' ')} • {activeAutomation.nodes.length} nodes
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -734,34 +812,33 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
                   >
                     {activeAutomation.status === 'published' ? 'Pause Workflow' : 'Publish Workflow'}
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={() => deleteMutation.mutate(activeAutomation.id)}>
-                    <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label="Delete workflow"
+                    className="text-[var(--color-danger)] hover:text-[var(--color-danger)]"
+                    onClick={() => deleteMutation.mutate(activeAutomation.id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               </div>
 
-              {/* Add Step Toolbar */}
-              <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2">
-                <span className="text-[11px] font-medium text-[var(--fg-muted)] mr-1">Append step:</span>
+              <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-2">
+                <span className="text-[11px] font-medium text-[var(--color-text-muted)] mr-1">Add step:</span>
                 {NODE_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => addConnectedNode(opt.value)}
-                    className="rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] font-medium text-[var(--fg-primary)] hover:border-[var(--accent)]"
-                  >
+                  <Button key={opt.value} size="sm" variant="secondary" onClick={() => addConnectedNode(opt.value)}>
                     + {opt.label}
-                  </button>
+                  </Button>
                 ))}
               </div>
 
-              {/* Visual Connected Nodes */}
-              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-dashed border-[var(--border-default)] bg-[var(--bg-subtle)] p-4 overflow-x-auto">
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-dashed border-[var(--color-border-strong)] bg-[var(--color-surface-muted)]/60 p-4 overflow-x-auto">
                 {activeAutomation.nodes.map((node, index) => (
                   <div key={node.id} className="flex items-center gap-3">
                     <div
                       onClick={() => setEditNode(node)}
-                      className="min-w-[180px] max-w-[220px] cursor-pointer rounded-lg border border-[var(--border-default)] bg-[var(--bg-surface)] p-3 shadow-sm hover:border-[var(--accent)]"
+                      className="min-w-[190px] max-w-[230px] cursor-pointer rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 shadow-sm hover:border-[var(--color-brand)] transition-colors"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <Badge tone={node.type === 'trigger' ? 'brand' : node.type === 'condition' ? 'warning' : 'neutral'}>
@@ -774,31 +851,31 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
                               e.stopPropagation();
                               removeNode(node.id);
                             }}
-                            className="text-red-400 hover:text-red-300"
+                            aria-label="Remove node"
+                            className="text-[var(--color-danger)] hover:opacity-80 cursor-pointer"
                           >
-                            <Trash2 className="h-3 w-3" />
+                            <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         )}
                       </div>
-                      <div className="mt-1.5 text-xs font-semibold text-[var(--fg-primary)]">{node.label}</div>
-                      <div className="mt-1 text-[11px] text-[var(--fg-muted)] truncate">
-                        {JSON.stringify(node.config) !== '{}' ? JSON.stringify(node.config) : 'Click to configure'}
+                      <div className="mt-2 text-xs font-semibold text-[var(--color-text)]">{node.label}</div>
+                      <div className="mt-1 text-[11px] text-[var(--color-text-muted)] truncate">
+                        {formatNodeSummary(node)}
                       </div>
                     </div>
                     {index < activeAutomation.nodes.length - 1 && (
-                      <ArrowRight className="h-4 w-4 shrink-0 text-[var(--fg-muted)]" />
+                      <ArrowRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
                     )}
                   </div>
                 ))}
               </div>
 
-              {/* Manual Trigger Test */}
-              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <select
                     value={testSubId}
                     onChange={(e) => setTestSubId(e.target.value)}
-                    className="rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--fg-primary)]"
+                    className="h-8 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-xs text-[var(--color-text)]"
                   >
                     <option value="">Select subscriber to test trigger...</option>
                     {(subscribersQuery.data?.subscribers ?? []).map((s) => (
@@ -813,10 +890,12 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
                     disabled={!testSubId || triggerTestMutation.isPending}
                     onClick={() => triggerTestMutation.mutate({ id: activeAutomation.id, subId: testSubId })}
                   >
-                    <Play className="mr-1 h-3.5 w-3.5" /> Run Test
+                    <Play className="h-3.5 w-3.5" /> Run Test
                   </Button>
                 </div>
-                <span className="text-[11px] text-[var(--fg-muted)]">Click any node box above to configure tag, sequence, or delay settings.</span>
+                <span className="text-[11px] text-[var(--color-text-muted)]">
+                  Click any node card to edit its tag, sequence, or delay settings.
+                </span>
               </div>
             </Card>
           )}
@@ -829,48 +908,42 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
         onOpenChange={(open) => {
           if (!open) setEditNode(null);
         }}
-        title={`Configure ${editNode?.type ?? 'Node'}`}
+        title={`Configure ${editNode?.type.replace('action_', '') ?? 'Step'}`}
       >
         {editNode && activeAutomation && (
-          <div className="space-y-3">
+          <div className="space-y-3 text-xs">
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Node Label</label>
-              <Input
-                value={editNode.label}
-                onChange={(e) => setEditNode({ ...editNode, label: e.target.value })}
-              />
+              <label className="mb-1 block font-medium text-[var(--color-text)]">Step Label</label>
+              <Input value={editNode.label} onChange={(e) => setEditNode({ ...editNode, label: e.target.value })} />
             </div>
 
             {(editNode.type === 'action_add_tag' ||
               editNode.type === 'action_remove_tag' ||
+              editNode.type === 'condition' ||
               (editNode.type === 'trigger' && activeAutomation.triggerType === 'tag_added')) && (
               <div>
-                <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Tag Name</label>
-                <Input
-                  value={String(editNode.config.tagName ?? '')}
-                  onChange={(e) =>
-                    setEditNode({ ...editNode, config: { ...editNode.config, tagName: e.target.value } })
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Central Tag</label>
+                <TagSingleSelect
+                  valueTagId={String(editNode.config.tagId ?? '')}
+                  onChangeTagId={(tagId, tagName) =>
+                    setEditNode({
+                      ...editNode,
+                      config: { ...editNode.config, tagId, tagName },
+                    })
                   }
-                  list="automation-tag-list"
-                  placeholder="e.g. vip-customer"
                 />
-                <datalist id="automation-tag-list">
-                  {(tagsQuery.data?.tags ?? []).map((t) => (
-                    <option key={t.id} value={t.name} />
-                  ))}
-                </datalist>
               </div>
             )}
 
             {(editNode.type === 'action_subscribe_sequence' || editNode.type === 'action_unsubscribe_sequence') && (
               <div>
-                <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Target Sequence</label>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Target Sequence</label>
                 <select
                   value={String(editNode.config.sequenceId ?? '')}
                   onChange={(e) =>
                     setEditNode({ ...editNode, config: { ...editNode.config, sequenceId: e.target.value } })
                   }
-                  className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-sm text-[var(--fg-primary)]"
+                  className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
                 >
                   <option value="">Select sequence...</option>
                   {(sequencesQuery.data?.sequences ?? []).map((sq) => (
@@ -884,12 +957,13 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
 
             {editNode.type === 'delay' && (
               <div>
-                <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Wait Duration (Minutes)</label>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Wait Duration (Hours)</label>
                 <Input
                   type="number"
-                  value={String(editNode.config.delayMinutes ?? 60)}
+                  min={1}
+                  value={String(editNode.config.delayHours ?? 24)}
                   onChange={(e) =>
-                    setEditNode({ ...editNode, config: { ...editNode.config, delayMinutes: Number(e.target.value) || 0 } })
+                    setEditNode({ ...editNode, config: { ...editNode.config, delayHours: Number(e.target.value) || 1 } })
                   }
                 />
               </div>
@@ -899,17 +973,13 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
               <div className="grid gap-2 sm:grid-cols-2">
                 <Input
                   value={String(editNode.config.fieldKey ?? '')}
-                  onChange={(e) =>
-                    setEditNode({ ...editNode, config: { ...editNode.config, fieldKey: e.target.value } })
-                  }
+                  onChange={(e) => setEditNode({ ...editNode, config: { ...editNode.config, fieldKey: e.target.value } })}
                   placeholder="Field key (e.g. plan)"
                 />
                 <Input
                   value={String(editNode.config.value ?? '')}
-                  onChange={(e) =>
-                    setEditNode({ ...editNode, config: { ...editNode.config, value: e.target.value } })
-                  }
-                  placeholder="Value"
+                  onChange={(e) => setEditNode({ ...editNode, config: { ...editNode.config, value: e.target.value } })}
+                  placeholder="New value"
                 />
               </div>
             )}
@@ -931,51 +1001,110 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
                   setEditNode(null);
                 }}
               >
-                Apply Node Changes
+                Save Step Settings
               </Button>
             </div>
           </div>
         )}
       </AppDialog>
 
-      {/* New Automation Dialog */}
-      <AppDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        title="New Visual Automation"
-      >
-        <div className="space-y-3">
-          <p className="text-xs text-[var(--fg-muted)]">Choose how subscribers enter this automation.</p>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Automation Name</label>
-            <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. Welcome Sequence Trigger" />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Entry Trigger</label>
-            <select
-              value={newTrigger}
-              onChange={(e) => setNewTrigger(e.target.value as AutomationTriggerType)}
-              className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-sm text-[var(--fg-primary)]"
-            >
-              {TRIGGER_OPTIONS.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          {newTrigger === 'tag_added' && (
-            <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Trigger Tag Name (optional)</label>
-              <Input value={newTagName} onChange={(e) => setNewTagName(e.target.value)} placeholder="e.g. newsletter" />
+      {/* Redesigned New Visual Automation Dialog */}
+      <AppDialog open={createOpen} onOpenChange={setCreateOpen} title="Create Visual Automation" maxWidthClass="max-w-lg">
+        <div className="space-y-4 text-xs">
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)]/60 p-3 space-y-2.5">
+            <div className="font-semibold uppercase tracking-wide text-[11px] text-[var(--color-text-muted)]">
+              1. Workflow Name
             </div>
-          )}
-          <div className="flex justify-end gap-2 pt-2">
+            <Input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="e.g. Newsletter Welcome Onboarding"
+            />
+          </div>
+
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)]/60 p-3 space-y-3">
+            <div className="font-semibold uppercase tracking-wide text-[11px] text-[var(--color-text-muted)]">
+              2. Entry Trigger Rule
+            </div>
+            <div>
+              <label className="mb-1 block font-medium text-[var(--color-text)]">Starts when...</label>
+              <select
+                value={newTrigger}
+                onChange={(e) => setNewTrigger(e.target.value as AutomationTriggerType)}
+                className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
+              >
+                {TRIGGER_OPTIONS.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1.5 text-[11px] text-[var(--color-text-muted)]">{triggerMeta.help}</p>
+            </div>
+
+            {newTrigger === 'tag_added' && (
+              <div>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">
+                  Required Trigger Tag <span className="text-[var(--color-danger)]">*</span>
+                </label>
+                <TagSingleSelect
+                  valueTagId={newTriggerTagId}
+                  onChangeTagId={(id, name) => {
+                    setNewTriggerTagId(id);
+                    setNewTriggerTagName(name);
+                  }}
+                  placeholder="Choose a tag from Tag Management..."
+                />
+              </div>
+            )}
+
+            {newTrigger === 'form_submitted' && (
+              <div>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">
+                  Required Form <span className="text-[var(--color-danger)]">*</span>
+                </label>
+                <select
+                  value={newTriggerFormId}
+                  onChange={(e) => setNewTriggerFormId(e.target.value)}
+                  className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
+                >
+                  <option value="">Select form...</option>
+                  {(formsQuery.data?.forms ?? []).map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {newTrigger === 'segment_joined' && (
+              <div>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">
+                  Required Segment <span className="text-[var(--color-danger)]">*</span>
+                </label>
+                <select
+                  value={newTriggerSegmentId}
+                  onChange={(e) => setNewTriggerSegmentId(e.target.value)}
+                  className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
+                >
+                  <option value="">Select segment...</option>
+                  {(segmentsQuery.data?.segments ?? []).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2 pt-1">
             <Button variant="secondary" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button disabled={!newName.trim() || createMutation.isPending} onClick={() => createMutation.mutate()}>
-              Create Automation
+            <Button disabled={!isCreateTriggerValid || createMutation.isPending} onClick={() => createMutation.mutate()}>
+              {createMutation.isPending ? 'Creating...' : 'Create Workflow'}
             </Button>
           </div>
         </div>
@@ -990,8 +1119,8 @@ export function AutomationsSection({ initialTab = 'builder' }: { initialTab?: 'b
 
 export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' | 'landing-pages' }) {
   const qc = useQueryClient();
+  const { byId: tagById } = useCentralTags();
 
-  // Form Modal
   const [formOpen, setFormOpen] = useState(false);
   const [formEditId, setFormEditId] = useState<string | null>(null);
   const [formName, setFormName] = useState('');
@@ -1004,7 +1133,6 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
   const [formPublished, setFormPublished] = useState(true);
   const [formTagIds, setFormTagIds] = useState<string[]>([]);
 
-  // Landing Page Modal
   const [pageOpen, setPageOpen] = useState(false);
   const [pageEditId, setPageEditId] = useState<string | null>(null);
   const [pageSlug, setPageSlug] = useState('');
@@ -1017,9 +1145,6 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
 
   const formsQuery = useQuery({ queryKey: ['forms'], queryFn: () => api.listForms() });
   const pagesQuery = useQuery({ queryKey: ['landing-pages'], queryFn: () => api.listLandingPages() });
-  const tagsQuery = useQuery({ queryKey: ['tags'], queryFn: () => api.listTags() });
-
-  const tags = tagsQuery.data?.tags ?? [];
 
   const saveFormMutation = useMutation({
     mutationFn: () => {
@@ -1100,8 +1225,8 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-sm font-semibold text-[var(--fg-primary)]">Hosted Landing Pages</h2>
-            <p className="text-xs text-[var(--fg-muted)]">
+            <h3 className="text-sm font-semibold text-[var(--color-text)]">Hosted Landing Pages</h3>
+            <p className="text-xs text-[var(--color-text-muted)]">
               Publish hosted opt-in pages served directly at <code>/v1/public/pages/:slug</code> with conversion tracking.
             </p>
           </div>
@@ -1118,18 +1243,20 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
               setPageOpen(true);
             }}
           >
-            <Plus className="mr-1.5 h-4 w-4" /> New Landing Page
+            <Plus className="h-4 w-4" /> New Landing Page
           </Button>
         </div>
 
         {pagesQuery.isLoading ? (
           <Skeleton className="h-32 w-full" />
         ) : pages.length === 0 ? (
-          <EmptyState
-            icon={<Globe className="h-5 w-5" />}
-            title="No landing pages yet"
-            description="Create a hosted signup page with explicit consent capture and automatic tag assignment."
-          />
+          <Card>
+            <EmptyState
+              icon={<Globe className="h-5 w-5" />}
+              title="No landing pages yet"
+              description="Create a hosted signup page with explicit consent capture and automatic tag assignment."
+            />
+          </Card>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             {pages.map((pg: LandingPageItem) => {
@@ -1139,12 +1266,12 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="flex items-center gap-2">
-                        <h3 className="text-sm font-semibold text-[var(--fg-primary)]">{pg.title}</h3>
+                        <h4 className="text-sm font-semibold text-[var(--color-text)]">{pg.title}</h4>
                         <Badge tone={pg.published ? 'success' : 'neutral'}>
                           {pg.published ? 'Published' : 'Draft'}
                         </Badge>
                       </div>
-                      <p className="text-xs font-mono text-[var(--fg-muted)] mt-0.5">{publicPath}</p>
+                      <p className="text-xs font-mono text-[var(--color-text-muted)] mt-0.5">{publicPath}</p>
                     </div>
                     <div className="flex gap-1">
                       <Button
@@ -1155,7 +1282,7 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
                           toast.success('Public landing page URL copied');
                         }}
                       >
-                        <Copy className="h-3.5 w-3.5" />
+                        <Copy className="h-3.5 w-3.5" /> URL
                       </Button>
                       <Button
                         size="sm"
@@ -1174,14 +1301,23 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
                       >
                         Edit
                       </Button>
-                      <Button size="sm" variant="secondary" onClick={() => deletePageMutation.mutate(pg.id)}>
-                        <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`Delete ${pg.title}`}
+                        className="text-[var(--color-danger)] hover:text-[var(--color-danger)]"
+                        onClick={() => deletePageMutation.mutate(pg.id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
                   </div>
-                  <div className="flex gap-4 text-xs text-[var(--fg-secondary)]">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
                     <span>Views: {pg.viewsCount}</span>
-                    <span>Signups: {pg.conversionCount}</span>
+                    <span>• Signups: {pg.conversionCount}</span>
+                    {pg.tagIds.map((id) => tagById.get(id)).filter(Boolean).map((t) => (
+                      <Badge key={t!.id} tone="brand">{t!.name}</Badge>
+                    ))}
                   </div>
                 </Card>
               );
@@ -1189,60 +1325,39 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
           </div>
         )}
 
-        <AppDialog
-          open={pageOpen}
-          onOpenChange={setPageOpen}
-          title={pageEditId ? 'Edit Landing Page' : 'Create Landing Page'}
-        >
-          <div className="space-y-3">
+        <AppDialog open={pageOpen} onOpenChange={setPageOpen} title={pageEditId ? 'Edit Landing Page' : 'Create Landing Page'}>
+          <div className="space-y-3 text-xs">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">URL Slug</label>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">URL Slug</label>
                 <Input value={pageSlug} onChange={(e) => setPageSlug(e.target.value)} placeholder="early-access" />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Page Title</label>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Page Title</label>
                 <Input value={pageTitle} onChange={(e) => setPageTitle(e.target.value)} placeholder="Early Access" />
               </div>
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Headline</label>
+              <label className="mb-1 block font-medium text-[var(--color-text)]">Headline</label>
               <Input value={pageHeadline} onChange={(e) => setPageHeadline(e.target.value)} />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Subheadline</label>
+              <label className="mb-1 block font-medium text-[var(--color-text)]">Subheadline</label>
               <Input value={pageSubheadline} onChange={(e) => setPageSubheadline(e.target.value)} />
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">CTA Button Text</label>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">CTA Button Text</label>
                 <Input value={pageBtn} onChange={(e) => setPageBtn(e.target.value)} />
               </div>
-              <label className="flex items-center gap-2 pt-6 text-xs">
+              <label className="flex items-center gap-2 pt-5">
                 <AppSwitch checked={pagePublished} onCheckedChange={setPagePublished} />
                 <span>Published publicly</span>
               </label>
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Assign Tags on Signup</label>
-              <div className="flex flex-wrap gap-1.5">
-                {tags.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() =>
-                      setPageTagIds((prev) => (prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id]))
-                    }
-                    className={`rounded-full border px-2.5 py-0.5 text-xs ${
-                      pageTagIds.includes(t.id)
-                        ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-fg)]'
-                        : 'border-[var(--border-default)]'
-                    }`}
-                  >
-                    {t.name}
-                  </button>
-                ))}
-              </div>
+              <label className="mb-1.5 block font-medium text-[var(--color-text)]">Assign Tags on Signup</label>
+              <TagMultiSelect selectedTagIds={pageTagIds} onChange={setPageTagIds} />
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="secondary" onClick={() => setPageOpen(false)}>
@@ -1266,8 +1381,8 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold text-[var(--fg-primary)]">Signup Forms & Embeds</h2>
-          <p className="text-xs text-[var(--fg-muted)]">
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">Signup Forms &amp; Embeds</h3>
+          <p className="text-xs text-[var(--color-text-muted)]">
             Create inline/embedded forms with explicit consent checkboxes, tag assignment, and public submission URLs.
           </p>
         </div>
@@ -1286,18 +1401,20 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
             setFormOpen(true);
           }}
         >
-          <Plus className="mr-1.5 h-4 w-4" /> New Signup Form
+          <Plus className="h-4 w-4" /> New Signup Form
         </Button>
       </div>
 
       {formsQuery.isLoading ? (
         <Skeleton className="h-32 w-full" />
       ) : forms.length === 0 ? (
-        <EmptyState
-          icon={<FileInput className="h-5 w-5" />}
-          title="No signup forms yet"
-          description="Create an embeddable form to grow your subscriber list and automatically apply tags or trigger automations."
-        />
+        <Card>
+          <EmptyState
+            icon={<FileInput className="h-5 w-5" />}
+            title="No signup forms yet"
+            description="Create an embeddable form to grow your subscriber list and automatically apply tags or trigger automations."
+          />
+        </Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {forms.map((f) => (
@@ -1305,17 +1422,24 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-semibold text-[var(--fg-primary)]">{f.name}</h3>
+                    <h4 className="text-sm font-semibold text-[var(--color-text)]">{f.name}</h4>
                     <Badge tone={f.published ? 'success' : 'neutral'}>{f.published ? 'Active' : 'Draft'}</Badge>
                     <Badge tone="brand">{f.formType}</Badge>
                   </div>
-                  <p className="text-xs text-[var(--fg-muted)] mt-0.5">
+                  <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
                     Submissions: {f.submissionCount} {f.doubleOptIn ? '• Double Opt-In' : ''}
                   </p>
+                  {f.tagIds.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {f.tagIds.map((id) => tagById.get(id)).filter(Boolean).map((t) => (
+                        <Badge key={t!.id} tone="neutral">{t!.name}</Badge>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-1">
                   <Button size="sm" variant="secondary" onClick={() => copyEmbedSnippet(f)} title="Copy HTML embed snippet">
-                    <Copy className="mr-1 h-3.5 w-3.5" /> Embed
+                    <Copy className="h-3.5 w-3.5" /> Embed
                   </Button>
                   <Button
                     size="sm"
@@ -1336,8 +1460,14 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
                   >
                     Edit
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={() => deleteFormMutation.mutate(f.id)}>
-                    <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`Delete ${f.name}`}
+                    className="text-[var(--color-danger)] hover:text-[var(--color-danger)]"
+                    onClick={() => deleteFormMutation.mutate(f.id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               </div>
@@ -1346,77 +1476,79 @@ export function GrowthSection({ initialTab = 'forms' }: { initialTab?: 'forms' |
         </div>
       )}
 
-      <AppDialog open={formOpen} onOpenChange={setFormOpen} title={formEditId ? 'Edit Signup Form' : 'Create Signup Form'}>
-        <div className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Form Name</label>
-              <Input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Footer Newsletter Box" />
+      <AppDialog
+        open={formOpen}
+        onOpenChange={setFormOpen}
+        title={formEditId ? 'Edit Signup Form' : 'Create Signup Form'}
+        maxWidthClass="max-w-xl"
+      >
+        <div className="space-y-4 text-xs">
+          {/* Group 1: Form Appearance */}
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)]/50 p-3 space-y-3">
+            <div className="font-semibold uppercase tracking-wide text-[11px] text-[var(--color-text-muted)]">
+              1. Form Appearance &amp; Copy
             </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Display Style</label>
-              <select
-                value={formType}
-                onChange={(e) => setFormType(e.target.value as 'inline' | 'popup' | 'embedded')}
-                className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-sm text-[var(--fg-primary)]"
-              >
-                <option value="inline">Inline</option>
-                <option value="embedded">Embedded</option>
-                <option value="popup">Popup</option>
-              </select>
-            </div>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Title</label>
-              <Input value={formTitle} onChange={(e) => setFormTitle(e.target.value)} />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Button Label</label>
-              <Input value={formBtn} onChange={(e) => setFormBtn(e.target.value)} />
-            </div>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Explicit Consent Checkbox Text</label>
-            <Input value={formConsent} onChange={(e) => setFormConsent(e.target.value)} />
-          </div>
-          <div className="flex flex-wrap gap-6 text-xs">
-            <label className="flex items-center gap-2">
-              <AppSwitch checked={formDoubleOptIn} onCheckedChange={setFormDoubleOptIn} />
-              <span>Require Double Opt-In Confirmation</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <AppSwitch checked={formPublished} onCheckedChange={setFormPublished} />
-              <span>Published</span>
-            </label>
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Apply Tags on Submission</label>
-            <div className="flex flex-wrap gap-1.5">
-              {tags.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() =>
-                    setFormTagIds((prev) => (prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id]))
-                  }
-                  className={`rounded-full border px-2.5 py-0.5 text-xs ${
-                    formTagIds.includes(t.id)
-                      ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-fg)]'
-                      : 'border-[var(--border-default)]'
-                  }`}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Internal Name</label>
+                <Input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Footer Newsletter Box" />
+              </div>
+              <div>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Display Type</label>
+                <select
+                  value={formType}
+                  onChange={(e) => setFormType(e.target.value as 'inline' | 'popup' | 'embedded')}
+                  className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
                 >
-                  {t.name}
-                </button>
-              ))}
+                  <option value="inline">Inline</option>
+                  <option value="embedded">Embedded</option>
+                  <option value="popup">Popup</option>
+                </select>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Heading Title</label>
+                <Input value={formTitle} onChange={(e) => setFormTitle(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1 block font-medium text-[var(--color-text)]">Submit Button Text</label>
+                <Input value={formBtn} onChange={(e) => setFormBtn(e.target.value)} />
+              </div>
             </div>
           </div>
-          <div className="flex justify-end gap-2 pt-2">
+
+          {/* Group 2: Subscriber Behavior & Compliance */}
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)]/50 p-3 space-y-3">
+            <div className="font-semibold uppercase tracking-wide text-[11px] text-[var(--color-text-muted)]">
+              2. Subscriber Behavior &amp; Consent
+            </div>
+            <div>
+              <label className="mb-1 block font-medium text-[var(--color-text)]">Consent Checkbox Copy</label>
+              <Input value={formConsent} onChange={(e) => setFormConsent(e.target.value)} />
+            </div>
+            <div className="flex flex-wrap gap-6 pt-1">
+              <label className="flex items-center gap-2">
+                <AppSwitch checked={formDoubleOptIn} onCheckedChange={setFormDoubleOptIn} />
+                <span>Require Double Opt-In Email Confirmation</span>
+              </label>
+              <label className="flex items-center gap-2">
+                <AppSwitch checked={formPublished} onCheckedChange={setFormPublished} />
+                <span>Published &amp; Accepting Signups</span>
+              </label>
+            </div>
+            <div>
+              <label className="mb-1.5 block font-medium text-[var(--color-text)]">Apply Tags Automatically</label>
+              <TagMultiSelect selectedTagIds={formTagIds} onChange={setFormTagIds} />
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-1">
             <Button variant="secondary" onClick={() => setFormOpen(false)}>
               Cancel
             </Button>
             <Button disabled={!formName.trim() || saveFormMutation.isPending} onClick={() => saveFormMutation.mutate()}>
-              Save Form
+              {saveFormMutation.isPending ? 'Saving...' : 'Save Signup Form'}
             </Button>
           </div>
         </div>

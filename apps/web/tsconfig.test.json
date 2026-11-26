@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src/components/marketing",
+    "outDir": "dist-test",
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": [
+    "src/components/marketing/marketingDraftHelpers.ts",
+    "src/components/marketing/marketingDraftHelpers.test.ts"
+  ]
+}

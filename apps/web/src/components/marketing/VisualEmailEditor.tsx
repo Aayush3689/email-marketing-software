@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import { Badge, Button, Card, Input } from '@mail/ui';
 import type { EmailBlockType, EmailTemplateBlock } from '@mail/shared-types';
 import {
@@ -23,6 +24,14 @@ import {
 import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '../../lib/api.js';
+import {
+  compileClientBlocks,
+  renderLocalPersonalization,
+  sanitizePreviewHtml,
+  stripHtmlToText,
+} from './marketingDraftHelpers.js';
+
+export { compileClientBlocks, sanitizePreviewHtml, stripHtmlToText };
 
 export const DEFAULT_TEMPLATE_BLOCKS: EmailTemplateBlock[] = [
   {
@@ -53,7 +62,7 @@ export const DEFAULT_TEMPLATE_BLOCKS: EmailTemplateBlock[] = [
   },
 ];
 
-const MERGE_VARS = [
+const BASE_MERGE_VARS = [
   { label: 'First Name (fallback)', token: '{{firstName | fallback: "there"}}' },
   { label: 'First Name', token: '{{firstName}}' },
   { label: 'Last Name', token: '{{lastName}}' },
@@ -71,160 +80,6 @@ const BLOCK_PALETTE: Array<{ type: EmailBlockType; label: string; icon: typeof H
   { type: 'social', label: 'Social Links', icon: Share2 },
   { type: 'footer', label: 'Footer + Unsub', icon: LayoutTemplate },
 ];
-
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
-export function sanitizePreviewHtml(unsafeHtml: string): string {
-  if (!unsafeHtml) return '';
-  return unsafeHtml
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/<(?:iframe|object|embed|form|meta|base)\b[^>]*>[\s\S]*?<\/(?:iframe|object|embed|form)>/gi, '')
-    .replace(/<(?:iframe|object|embed|meta|base)\b[^>]*\/?>/gi, '')
-    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/(href|src)\s*=\s*(["'])\s*(?:javascript|vbscript|data:text\/html):[^"']*\2/gi, '$1=$2#$2');
-}
-
-export function stripHtmlToText(html: string): string {
-  return html
-    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|h1|h2|h3|h4|li|tr)>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-export function compileClientBlocks(
-  blocks: EmailTemplateBlock[],
-  opts?: { subject?: string; previewText?: string }
-): { htmlBody: string; textBody: string } {
-  const htmlParts: string[] = [];
-  const textParts: string[] = [];
-
-  if (opts?.previewText) {
-    htmlParts.push(
-      `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">${escapeHtml(opts.previewText)}</div>`
-    );
-  }
-
-  for (const block of blocks) {
-    const p = block.props ?? {};
-    switch (block.type) {
-      case 'heading': {
-        const text = String(p.text ?? 'Heading');
-        const level = String(p.level ?? 'h2') === 'h1' ? 'h1' : 'h2';
-        const fontSize = level === 'h1' ? '26px' : '20px';
-        htmlParts.push(
-          `<${level} style="margin:0 0 14px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:${fontSize};line-height:1.3;color:#111827;">${escapeHtml(text)}</${level}>`
-        );
-        textParts.push(text.toUpperCase());
-        break;
-      }
-      case 'text': {
-        const text = String(p.text ?? '');
-        for (const para of text.split(/\n{2,}/)) {
-          const safe = escapeHtml(para).replaceAll('\n', '<br />');
-          htmlParts.push(
-            `<p style="margin:0 0 14px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.6;color:#374151;">${safe}</p>`
-          );
-          textParts.push(para);
-        }
-        break;
-      }
-      case 'image': {
-        const src = String(p.src ?? '').trim();
-        const alt = String(p.alt ?? 'Image');
-        const href = String(p.href ?? '').trim();
-        if (src && /^https?:\/\//i.test(src)) {
-          const img = `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" style="display:block;max-width:100%;height:auto;border-radius:6px;margin:0 auto 16px;" />`;
-          htmlParts.push(
-            href && /^https?:\/\//i.test(href)
-              ? `<a href="${escapeHtml(href)}" style="text-decoration:none;">${img}</a>`
-              : img
-          );
-          textParts.push(`[${alt}]${href ? ` (${href})` : ''}`);
-        }
-        break;
-      }
-      case 'button': {
-        const label = String(p.label ?? 'Learn more');
-        const url = /^https?:\/\//i.test(String(p.url ?? '')) ? String(p.url) : 'https://example.com';
-        const bg = /^#[0-9a-fA-F]{6}$/.test(String(p.color ?? '')) ? String(p.color) : '#18181b';
-        htmlParts.push(
-          `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:18px 0;"><tr><td style="border-radius:6px;background:${bg};"><a href="${escapeHtml(url)}" style="display:inline-block;padding:11px 20px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:6px;">${escapeHtml(label)}</a></td></tr></table>`
-        );
-        textParts.push(`${label}: ${url}`);
-        break;
-      }
-      case 'divider': {
-        htmlParts.push(`<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />`);
-        textParts.push('---');
-        break;
-      }
-      case 'columns': {
-        const left = escapeHtml(String(p.leftText ?? 'Left column')).replaceAll('\n', '<br />');
-        const right = escapeHtml(String(p.rightText ?? 'Right column')).replaceAll('\n', '<br />');
-        htmlParts.push(
-          `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:14px 0;"><tr><td width="50%" valign="top" style="padding-right:10px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.5;color:#374151;">${left}</td><td width="50%" valign="top" style="padding-left:10px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.5;color:#374151;">${right}</td></tr></table>`
-        );
-        textParts.push(`${String(p.leftText ?? '')}\n${String(p.rightText ?? '')}`);
-        break;
-      }
-      case 'social': {
-        const linksRaw = Array.isArray(p.links) ? p.links : ['https://x.com', 'https://linkedin.com'];
-        const anchors = linksRaw
-          .map((u) => String(u).trim())
-          .filter((u) => /^https?:\/\//i.test(u))
-          .map(
-            (u) =>
-              `<a href="${escapeHtml(u)}" style="color:#2563eb;text-decoration:none;margin-right:12px;font-size:13px;">${escapeHtml(u.replace(/^https?:\/\/(?:www\.)?/i, '').split('/')[0] ?? u)}</a>`
-          );
-        if (anchors.length > 0) {
-          htmlParts.push(`<div style="margin:14px 0;">${anchors.join('')}</div>`);
-          textParts.push(linksRaw.join(' | '));
-        }
-        break;
-      }
-      case 'footer': {
-        const company = String(p.company ?? 'FastConnect Sender');
-        const address = String(p.address ?? '');
-        const unsubLabel = String(p.unsubscribeText ?? 'Unsubscribe');
-        htmlParts.push(
-          `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e7eb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:12px;line-height:1.5;color:#6b7280;"><div>${escapeHtml(company)}${address ? ` &bull; ${escapeHtml(address)}` : ''}</div><div style="margin-top:6px;"><a href="{{unsubscribeUrl}}" style="color:#6b7280;text-decoration:underline;">${escapeHtml(unsubLabel)}</a></div></div>`
-        );
-        textParts.push(`${company}${address ? ` - ${address}` : ''}\n${unsubLabel}: {{unsubscribeUrl}}`);
-        break;
-      }
-    }
-  }
-
-  const wrappedHtml = `<!doctype html><html><body style="margin:0;padding:24px 12px;background:#f9fafb;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center"><table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:28px;"><tr><td>${htmlParts.join('\n')}</td></tr></table></td></tr></table></body></html>`;
-
-  return {
-    htmlBody: sanitizePreviewHtml(wrappedHtml),
-    textBody: textParts.join('\n\n').trim() || opts?.subject || '',
-  };
-}
-
-function renderLocalPersonalization(content: string, vars: Record<string, string>): string {
-  return content.replace(/\{\{\s*([a-zA-Z0-9_]+)(?:\s*\|\s*fallback:\s*["']([^"']*)["'])?\s*\}\}/g, (_m, key: string, fb?: string) => {
-    const val = vars[key];
-    if (val !== undefined && val !== '') return val;
-    return fb ?? '';
-  });
-}
 
 function createDefaultBlock(type: EmailBlockType): EmailTemplateBlock {
   const id = `blk_${type}_${Math.random().toString(36).slice(2, 8)}`;
@@ -285,15 +140,31 @@ export function VisualEmailEditor({
   const [sampleEmail, setSampleEmail] = useState('aarav@example.com');
   const [verifyingServer, setVerifyingServer] = useState(false);
 
-  const sampleVars = useMemo(
-    () => ({
+  const customFieldsQuery = useQuery({
+    queryKey: ['custom-fields'],
+    queryFn: () => api.listCustomFields(),
+  });
+
+  const mergeVars = useMemo(() => {
+    const customVars = (customFieldsQuery.data?.customFields ?? []).map((cf) => ({
+      label: cf.label,
+      token: `{{${cf.fieldKey}}}`,
+    }));
+    return [...BASE_MERGE_VARS, ...customVars];
+  }, [customFieldsQuery.data?.customFields]);
+
+  const sampleVars = useMemo(() => {
+    const base: Record<string, string> = {
       firstName: sampleFirst,
       lastName: sampleLast,
       email: sampleEmail,
       unsubscribeUrl: 'https://fastconnect.local/v1/unsubscribe/sample-preview',
-    }),
-    [sampleEmail, sampleFirst, sampleLast]
-  );
+    };
+    for (const cf of customFieldsQuery.data?.customFields ?? []) {
+      base[cf.fieldKey] = `[${cf.label}]`;
+    }
+    return base;
+  }, [customFieldsQuery.data?.customFields, sampleEmail, sampleFirst, sampleLast]);
 
   const renderedPreviewHtml = useMemo(
     () => renderLocalPersonalization(sanitizePreviewHtml(htmlBody), sampleVars),
@@ -304,6 +175,9 @@ export function VisualEmailEditor({
 
   const hasUnsubscribeLink = /\{\{\s*unsubscribeUrl\s*\}\}|unsubscribe/i.test(htmlBody);
   const hasPlainText = textBody.trim().length > 0;
+  const imageBlocksMissingAlt = blocks.filter(
+    (b) => b.type === 'image' && !String(b.props.alt ?? '').trim()
+  ).length;
 
   const syncFromBlocks = (nextBlocks: EmailTemplateBlock[]) => {
     const compiled = compileClientBlocks(nextBlocks, {
@@ -352,10 +226,12 @@ export function VisualEmailEditor({
     if (editorMode === 'blocks' && active) {
       if (active.type === 'text' || active.type === 'heading') {
         updateBlockProp(active.id, 'text', `${String(active.props.text ?? '')} ${token}`.trim());
+        toast.success(`Inserted ${token} into ${active.type} block`);
         return;
       }
       if (active.type === 'footer') {
         updateBlockProp(active.id, 'address', `${String(active.props.address ?? '')} ${token}`.trim());
+        toast.success(`Inserted ${token} into footer`);
         return;
       }
     }
@@ -389,11 +265,11 @@ export function VisualEmailEditor({
   const selectedBlock = blocks.find((b) => b.id === selectedBlockId) ?? blocks[0] ?? null;
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {/* Subject & Preheader */}
       <div className="grid gap-3 md:grid-cols-2">
         <div>
-          <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Subject Line</label>
+          <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Subject Line</label>
           <Input
             value={subject}
             onChange={(e) => onChange({ subject: e.target.value })}
@@ -401,7 +277,7 @@ export function VisualEmailEditor({
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Preview Text (Preheader)</label>
+          <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Preview Text (Preheader)</label>
           <Input
             value={previewText}
             onChange={(e) => onChange({ previewText: e.target.value })}
@@ -410,50 +286,62 @@ export function VisualEmailEditor({
         </div>
       </div>
 
-      {/* Mode Switcher + Personalization Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3 py-2">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            size="sm"
-            variant={editorMode === 'blocks' ? 'primary' : 'secondary'}
+      {/* Mode Switcher Tabs + Personalization Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2">
+        <div className="flex items-center gap-1 rounded-md bg-[var(--color-surface)] p-0.5 border border-[var(--color-border)]">
+          <button
+            type="button"
             onClick={() => setEditorMode('blocks')}
+            className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+              editorMode === 'blocks'
+                ? 'bg-[var(--color-accent)] text-[var(--color-accent-fg)]'
+                : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
+            }`}
           >
-            <LayoutTemplate className="mr-1 h-3.5 w-3.5" /> Visual Blocks
-          </Button>
-          <Button
-            size="sm"
-            variant={editorMode === 'html' ? 'primary' : 'secondary'}
+            <LayoutTemplate className="h-3.5 w-3.5" /> Visual Blocks
+          </button>
+          <button
+            type="button"
             onClick={() => setEditorMode('html')}
+            className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+              editorMode === 'html'
+                ? 'bg-[var(--color-accent)] text-[var(--color-accent-fg)]'
+                : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
+            }`}
           >
-            <Code2 className="mr-1 h-3.5 w-3.5" /> HTML Source
-          </Button>
-          <Button
-            size="sm"
-            variant={editorMode === 'text' ? 'primary' : 'secondary'}
+            <Code2 className="h-3.5 w-3.5" /> HTML Source
+          </button>
+          <button
+            type="button"
             onClick={() => setEditorMode('text')}
+            className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+              editorMode === 'text'
+                ? 'bg-[var(--color-accent)] text-[var(--color-accent-fg)]'
+                : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
+            }`}
           >
-            <FileText className="mr-1 h-3.5 w-3.5" /> Plain Text
-          </Button>
+            <FileText className="h-3.5 w-3.5" /> Plain Text
+          </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] font-medium text-[var(--fg-muted)]">Insert variable:</span>
-          {MERGE_VARS.map((v) => (
+          <span className="text-[11px] font-medium text-[var(--color-text-muted)]">Personalize:</span>
+          {mergeVars.map((v) => (
             <button
               key={v.token}
               type="button"
               onClick={() => insertMergeVarIntoBlock(v.token)}
-              className="rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--fg-primary)] hover:border-[var(--accent)]"
+              className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text)] hover:border-[var(--color-brand)] transition-colors cursor-pointer"
             >
-              {v.label}
+              + {v.label}
             </button>
           ))}
         </div>
       </div>
 
       {/* Warnings Banner */}
-      {(!hasUnsubscribeLink || !hasPlainText) && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+      {(!hasUnsubscribeLink || !hasPlainText || imageBlocksMissingAlt > 0) && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-300">
           <AlertTriangle className="h-4 w-4 shrink-0" />
           <div className="flex flex-wrap items-center gap-3">
             {!hasUnsubscribeLink && (
@@ -464,55 +352,53 @@ export function VisualEmailEditor({
                 Plain-text fallback is empty.{' '}
                 <button
                   type="button"
-                  className="underline font-medium"
+                  className="underline font-medium cursor-pointer"
                   onClick={() => onChange({ textBody: stripHtmlToText(htmlBody) })}
                 >
                   Auto-generate from HTML
                 </button>
               </span>
             )}
+            {imageBlocksMissingAlt > 0 && (
+              <span>{imageBlocksMissingAlt} image block(s) missing alt text for accessibility.</span>
+            )}
           </div>
         </div>
       )}
 
-      {/* Main Split Workspace */}
-      <div className={`grid gap-4 ${compact ? 'lg:grid-cols-2' : 'xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]'}`}>
-        {/* Left: Editor Pane */}
-        <Card className="p-3 space-y-3">
+      {/* Main Two-Panel Workspace */}
+      <div className={`grid gap-5 items-start ${compact ? 'lg:grid-cols-2' : 'xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]'}`}>
+        {/* Left: Content & Block Inspector */}
+        <Card className="p-4 space-y-4">
           {editorMode === 'blocks' && (
             <>
               <div>
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--fg-muted)]">
+                <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
                   Add Content Block
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   {BLOCK_PALETTE.map((item) => {
                     const Icon = item.icon;
                     return (
-                      <button
-                        key={item.type}
-                        type="button"
-                        onClick={() => addBlock(item.type)}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-default)] bg-[var(--bg-subtle)] px-2.5 py-1.5 text-xs font-medium text-[var(--fg-primary)] hover:border-[var(--accent)]"
-                      >
-                        <Icon className="h-3.5 w-3.5 text-[var(--fg-muted)]" />
+                      <Button key={item.type} type="button" size="sm" variant="secondary" onClick={() => addBlock(item.type)}>
+                        <Icon className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
                         {item.label}
-                      </button>
+                      </Button>
                     );
                   })}
                 </div>
               </div>
 
-              <div className="space-y-2 max-h-[340px] overflow-y-auto pr-1">
+              <div className="space-y-2">
                 {blocks.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-[var(--border-default)] p-6 text-center text-xs text-[var(--fg-muted)]">
-                    No blocks yet. Add a Heading, Paragraph, CTA Button, or Footer block above, or{' '}
+                  <div className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-xs text-[var(--color-text-muted)]">
+                    No content blocks yet. Add blocks above or{' '}
                     <button
                       type="button"
-                      className="underline text-[var(--fg-primary)]"
+                      className="underline text-[var(--color-brand)] cursor-pointer"
                       onClick={() => syncFromBlocks(DEFAULT_TEMPLATE_BLOCKS)}
                     >
-                      load starter blocks
+                      load starter layout
                     </button>
                     .
                   </div>
@@ -525,14 +411,14 @@ export function VisualEmailEditor({
                         onClick={() => setSelectedBlockId(block.id)}
                         className={`cursor-pointer rounded-lg border p-2.5 transition-colors ${
                           active
-                            ? 'border-[var(--accent)] bg-[var(--bg-subtle)]'
-                            : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--border-default)]'
+                            ? 'border-[var(--color-brand)] bg-[var(--color-brand-soft)]/50 ring-1 ring-[var(--color-brand)]/40'
+                            : 'border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-border-strong)]'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2 min-w-0">
-                            <Badge tone="neutral">{block.type}</Badge>
-                            <span className="truncate text-xs text-[var(--fg-secondary)]">
+                            <Badge tone={active ? 'brand' : 'neutral'}>{block.type}</Badge>
+                            <span className="truncate text-xs text-[var(--color-text)]">
                               {String(
                                 block.props.text ??
                                   block.props.label ??
@@ -543,33 +429,40 @@ export function VisualEmailEditor({
                               )}
                             </span>
                           </div>
-                          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                            <button
+                          <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+                            <Button
                               type="button"
+                              size="icon"
+                              variant="ghost"
                               disabled={index === 0}
                               onClick={() => moveBlock(index, -1)}
-                              className="rounded p-1 text-[var(--fg-muted)] hover:bg-[var(--bg-subtle)] disabled:opacity-30"
-                              title="Move up"
+                              title="Move block up"
+                              aria-label="Move block up"
                             >
                               <ArrowUp className="h-3.5 w-3.5" />
-                            </button>
-                            <button
+                            </Button>
+                            <Button
                               type="button"
+                              size="icon"
+                              variant="ghost"
                               disabled={index === blocks.length - 1}
                               onClick={() => moveBlock(index, 1)}
-                              className="rounded p-1 text-[var(--fg-muted)] hover:bg-[var(--bg-subtle)] disabled:opacity-30"
-                              title="Move down"
+                              title="Move block down"
+                              aria-label="Move block down"
                             >
                               <ArrowDown className="h-3.5 w-3.5" />
-                            </button>
-                            <button
+                            </Button>
+                            <Button
                               type="button"
+                              size="icon"
+                              variant="ghost"
                               onClick={() => removeBlock(block.id)}
-                              className="rounded p-1 text-red-400 hover:bg-red-500/10"
                               title="Delete block"
+                              aria-label="Delete block"
+                              className="text-[var(--color-danger)] hover:text-[var(--color-danger)]"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
-                            </button>
+                            </Button>
                           </div>
                         </div>
                       </div>
@@ -578,16 +471,15 @@ export function VisualEmailEditor({
                 )}
               </div>
 
-              {/* Selected Block Inspector */}
               {selectedBlock && (
-                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3 space-y-2.5">
+                <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-3.5 space-y-2.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold uppercase tracking-wide text-[var(--fg-muted)]">
-                      Edit {selectedBlock.type} Block
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+                      Properties — {selectedBlock.type}
                     </span>
                   </div>
                   {selectedBlock.type === 'heading' && (
-                    <div className="grid gap-2 sm:grid-cols-[1fr_110px]">
+                    <div className="grid gap-2 sm:grid-cols-[1fr_120px]">
                       <Input
                         value={String(selectedBlock.props.text ?? '')}
                         onChange={(e) => updateBlockProp(selectedBlock.id, 'text', e.target.value)}
@@ -596,7 +488,7 @@ export function VisualEmailEditor({
                       <select
                         value={String(selectedBlock.props.level ?? 'h2')}
                         onChange={(e) => updateBlockProp(selectedBlock.id, 'level', e.target.value)}
-                        className="rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1.5 text-xs text-[var(--fg-primary)]"
+                        className="h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-xs text-[var(--color-text)]"
                       >
                         <option value="h1">H1 (26px)</option>
                         <option value="h2">H2 (20px)</option>
@@ -605,10 +497,10 @@ export function VisualEmailEditor({
                   )}
                   {selectedBlock.type === 'text' && (
                     <textarea
-                      rows={4}
+                      rows={5}
                       value={String(selectedBlock.props.text ?? '')}
                       onChange={(e) => updateBlockProp(selectedBlock.id, 'text', e.target.value)}
-                      className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] p-2.5 text-sm text-[var(--fg-primary)]"
+                      className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5 text-sm text-[var(--color-text)] focus:border-[var(--color-brand)] focus:outline-none"
                       placeholder="Write paragraph text..."
                     />
                   )}
@@ -653,17 +545,17 @@ export function VisualEmailEditor({
                   {selectedBlock.type === 'columns' && (
                     <div className="grid gap-2 sm:grid-cols-2">
                       <textarea
-                        rows={3}
+                        rows={4}
                         value={String(selectedBlock.props.leftText ?? '')}
                         onChange={(e) => updateBlockProp(selectedBlock.id, 'leftText', e.target.value)}
-                        className="rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] p-2 text-xs text-[var(--fg-primary)]"
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2 text-xs text-[var(--color-text)] focus:border-[var(--color-brand)] focus:outline-none"
                         placeholder="Left column"
                       />
                       <textarea
-                        rows={3}
+                        rows={4}
                         value={String(selectedBlock.props.rightText ?? '')}
                         onChange={(e) => updateBlockProp(selectedBlock.id, 'rightText', e.target.value)}
-                        className="rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] p-2 text-xs text-[var(--fg-primary)]"
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2 text-xs text-[var(--color-text)] focus:border-[var(--color-brand)] focus:outline-none"
                         placeholder="Right column"
                       />
                     </div>
@@ -694,17 +586,17 @@ export function VisualEmailEditor({
                       <Input
                         value={String(selectedBlock.props.address ?? '')}
                         onChange={(e) => updateBlockProp(selectedBlock.id, 'address', e.target.value)}
-                        placeholder="Postal address or why subscribed"
+                        placeholder="Postal address or reason"
                       />
                       <Input
                         value={String(selectedBlock.props.unsubscribeText ?? 'Unsubscribe')}
                         onChange={(e) => updateBlockProp(selectedBlock.id, 'unsubscribeText', e.target.value)}
-                        placeholder="Unsubscribe link label"
+                        placeholder="Unsubscribe label"
                       />
                     </div>
                   )}
                   {selectedBlock.type === 'divider' && (
-                    <p className="text-xs text-[var(--fg-muted)]">Horizontal 1px divider line.</p>
+                    <p className="text-xs text-[var(--color-text-muted)]">Horizontal 1px divider separator.</p>
                   )}
                 </div>
               )}
@@ -714,14 +606,10 @@ export function VisualEmailEditor({
           {editorMode === 'html' && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-medium text-[var(--fg-muted)]">
-                  Email HTML Source (automatically sanitized on save and send)
+                <p className="text-xs font-medium text-[var(--color-text-muted)]">
+                  Email HTML Source (sanitized automatically on save and send)
                 </p>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => onChange({ textBody: stripHtmlToText(htmlBody) })}
-                >
+                <Button size="sm" variant="secondary" onClick={() => onChange({ textBody: stripHtmlToText(htmlBody) })}>
                   Sync Plain Text
                 </Button>
               </div>
@@ -729,7 +617,7 @@ export function VisualEmailEditor({
                 rows={18}
                 value={htmlBody}
                 onChange={(e) => onChange({ htmlBody: e.target.value })}
-                className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] p-3 font-mono text-xs text-[var(--fg-primary)]"
+                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-3 font-mono text-xs text-[var(--color-text)] focus:border-[var(--color-brand)] focus:outline-none"
                 placeholder="<html>...</html>"
               />
             </div>
@@ -738,14 +626,10 @@ export function VisualEmailEditor({
           {editorMode === 'text' && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-medium text-[var(--fg-muted)]">
-                  Multipart Plain-Text Version (improves spam filtering & text-only clients)
+                <p className="text-xs font-medium text-[var(--color-text-muted)]">
+                  Multipart Plain-Text Fallback (improves deliverability & text-only readers)
                 </p>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => onChange({ textBody: stripHtmlToText(htmlBody) })}
-                >
+                <Button size="sm" variant="secondary" onClick={() => onChange({ textBody: stripHtmlToText(htmlBody) })}>
                   Generate from HTML
                 </Button>
               </div>
@@ -753,7 +637,7 @@ export function VisualEmailEditor({
                 rows={18}
                 value={textBody}
                 onChange={(e) => onChange({ textBody: e.target.value })}
-                className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] p-3 font-mono text-xs text-[var(--fg-primary)]"
+                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-3 font-mono text-xs text-[var(--color-text)] focus:border-[var(--color-brand)] focus:outline-none"
                 placeholder="Plain text email body..."
               />
             </div>
@@ -761,68 +645,76 @@ export function VisualEmailEditor({
         </Card>
 
         {/* Right: Sanitized Desktop/Mobile Preview */}
-        <Card className="p-3 space-y-3">
+        <Card className="p-4 space-y-3 xl:sticky xl:top-20">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <Eye className="h-4 w-4 text-[var(--fg-muted)]" />
-              <span className="text-xs font-semibold uppercase tracking-wide text-[var(--fg-muted)]">
+              <Eye className="h-4 w-4 text-[var(--color-text-muted)]" />
+              <span className="text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
                 Live Inbox Preview
               </span>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1">
               <Button
+                type="button"
                 size="sm"
-                variant={previewDevice === 'desktop' ? 'primary' : 'secondary'}
+                variant={previewDevice === 'desktop' ? 'primary' : 'ghost'}
                 onClick={() => setPreviewDevice('desktop')}
               >
-                <Monitor className="mr-1 h-3.5 w-3.5" /> Desktop
+                <Monitor className="h-3.5 w-3.5" /> Desktop
               </Button>
               <Button
+                type="button"
                 size="sm"
-                variant={previewDevice === 'mobile' ? 'primary' : 'secondary'}
+                variant={previewDevice === 'mobile' ? 'primary' : 'ghost'}
                 onClick={() => setPreviewDevice('mobile')}
               >
-                <Smartphone className="mr-1 h-3.5 w-3.5" /> Mobile
+                <Smartphone className="h-3.5 w-3.5" /> Mobile
               </Button>
-              <Button size="sm" variant="secondary" disabled={verifyingServer} onClick={handleServerRenderCheck}>
-                <Sparkles className="mr-1 h-3.5 w-3.5" /> {verifyingServer ? 'Checking...' : 'Validate'}
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={verifyingServer}
+                onClick={handleServerRenderCheck}
+              >
+                <Sparkles className="h-3.5 w-3.5" /> {verifyingServer ? 'Checking...' : 'Validate'}
               </Button>
             </div>
           </div>
 
-          <div className="grid gap-2 sm:grid-cols-3 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2">
+          <div className="grid gap-2 sm:grid-cols-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-2">
             <Input
               value={sampleFirst}
               onChange={(e) => setSampleFirst(e.target.value)}
               placeholder="Sample firstName"
-              className="text-xs"
+              className="text-xs h-8"
             />
             <Input
               value={sampleLast}
               onChange={(e) => setSampleLast(e.target.value)}
               placeholder="Sample lastName"
-              className="text-xs"
+              className="text-xs h-8"
             />
             <Input
               value={sampleEmail}
               onChange={(e) => setSampleEmail(e.target.value)}
               placeholder="Sample email"
-              className="text-xs"
+              className="text-xs h-8"
             />
           </div>
 
-          <div className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3 py-2 text-xs">
-            <div className="font-medium text-[var(--fg-primary)]">
+          <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-3 py-2 text-xs">
+            <div className="font-medium text-[var(--color-text)]">
               Subject: <span className="font-normal">{renderedSubject || '(no subject)'}</span>
             </div>
             {previewText && (
-              <div className="text-[var(--fg-muted)] truncate">
+              <div className="text-[var(--color-text-muted)] truncate">
                 Preheader: {renderLocalPersonalization(previewText, sampleVars)}
               </div>
             )}
           </div>
 
-          <div className="flex justify-center rounded-lg border border-[var(--border-subtle)] bg-zinc-100 p-3">
+          <div className="flex justify-center rounded-lg border border-[var(--color-border)] bg-zinc-100 dark:bg-zinc-900 p-3">
             <iframe
               title="Email Render Preview"
               sandbox=""
@@ -830,8 +722,8 @@ export function VisualEmailEditor({
               style={{
                 width: previewDevice === 'mobile' ? '375px' : '100%',
                 maxWidth: '640px',
-                height: '380px',
-                border: '1px solid #e5e7eb',
+                height: '460px',
+                border: '1px solid #e4e4e7',
                 borderRadius: '8px',
                 background: '#ffffff',
               }}

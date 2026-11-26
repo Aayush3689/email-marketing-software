@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, Download, Plus, ShieldBan, Trash2, Upload 
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { api } from '../../lib/api.js';
+import { TagMultiSelect, invalidateAllTagDependents, useCentralTags } from './TagSelector.js';
 
 function parseQuickCsvPreview(text: string): { headers: string[]; rows: string[][] } {
   const lines = text
@@ -43,23 +44,32 @@ export function ImportExportWizardSection() {
   const [fileName, setFileName] = useState<string>('subscribers.csv');
   const [csvText, setCsvText] = useState('email,firstName,lastName,tags\nalice@example.com,Alice,Rivera,Newsletter');
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
+  const [selectedDefaultTagIds, setSelectedDefaultTagIds] = useState<string[]>([]);
   const [defaultTagsInput, setDefaultTagsInput] = useState('');
   const [consentSource, setConsentSource] = useState('');
   const [consentConfirmed, setConsentConfirmed] = useState(false);
   const [latestJob, setLatestJob] = useState<ContactImportJobItem | null>(null);
 
   const jobsQuery = useQuery({ queryKey: ['import-jobs'], queryFn: () => api.listImportJobs() });
+  const { byId: tagById } = useCentralTags();
   const parsed = parseQuickCsvPreview(csvText);
+
+  const resolvedDefaultTags = Array.from(
+    new Set([
+      ...selectedDefaultTagIds.map((id) => tagById.get(id)?.name).filter((n): n is string => Boolean(n)),
+      ...defaultTagsInput
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ])
+  );
 
   const importMutation = useMutation({
     mutationFn: () =>
       api.importSubscribersCsv({
         fileName,
         consentSource: consentSource.trim(),
-        defaultTags: defaultTagsInput
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
+        defaultTags: resolvedDefaultTags,
         fieldMapping,
         csvText,
       }),
@@ -69,9 +79,7 @@ export function ImportExportWizardSection() {
       toast.success(`Import finished: ${res.job.importedCount} new, ${res.job.updatedCount} updated`);
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['import-jobs'] }),
-        qc.invalidateQueries({ queryKey: ['subscribers'] }),
-        qc.invalidateQueries({ queryKey: ['tags'] }),
-        qc.invalidateQueries({ queryKey: ['campaigns'] }),
+        invalidateAllTagDependents(qc),
       ]);
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Import failed'),
@@ -239,8 +247,20 @@ export function ImportExportWizardSection() {
 
         {step === 5 && (
           <div className="space-y-3">
-            <label className="font-medium block">Tags to apply to all imported subscribers (comma-separated)</label>
-            <Input placeholder="Newsletter, Imported 2026" value={defaultTagsInput} onChange={(e) => setDefaultTagsInput(e.target.value)} />
+            <div className="space-y-1.5">
+              <label className="font-medium block">Select existing centralized tags to apply to imported subscribers</label>
+              <TagMultiSelect
+                selectedTagIds={selectedDefaultTagIds}
+                onChange={setSelectedDefaultTagIds}
+                emptyText="No existing tags yet — you can add new tags below."
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="font-medium block text-[var(--color-text-muted)]">
+                Optional new tags to create and apply (comma-separated)
+              </label>
+              <Input placeholder="Webinar 2026, VIP Import" value={defaultTagsInput} onChange={(e) => setDefaultTagsInput(e.target.value)} />
+            </div>
             <div className="flex justify-between">
               <Button variant="secondary" onClick={() => setStep(4)}>Back</Button>
               <Button onClick={() => setStep(6)}>Next: Confirm Consent</Button>

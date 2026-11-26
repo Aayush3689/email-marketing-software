@@ -44,7 +44,15 @@ type AutomationTab = 'builder' | 'activity';
 type GrowthTab = 'forms' | 'landing-pages';
 
 export function CampaignsView() {
-  const [section, setSection] = useState<TopSection>('marketing');
+  const [section, setSection] = useState<TopSection>(() => {
+    try {
+      const m = sessionStorage.getItem('fastconnect_broadcast_composer_mode');
+      if (m === 'new' || m === 'edit') return 'marketing';
+    } catch {
+      // ignore
+    }
+    return 'marketing';
+  });
   const [audienceTab, setAudienceTab] = useState<AudienceTab>('subscribers');
   const [marketingTab, setMarketingTab] = useState<MarketingTab>('broadcasts');
   const [automationTab, setAutomationTab] = useState<AutomationTab>('builder');
@@ -79,23 +87,37 @@ export function CampaignsView() {
     setAudienceTab('import-export');
   };
 
-  const pillButtonClass = (active: boolean) =>
-    `inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+  const handleOpenTagManager = () => {
+    setSection('audience');
+    setAudienceTab('tags');
+  };
+
+  // Top-level domain navigation tabs (underlined navigation bar — visually distinct from action buttons)
+  const topNavTabClass = (active: boolean) =>
+    `inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition-colors cursor-pointer ${
       active
-        ? 'bg-[var(--accent)] text-[var(--accent-fg)] shadow-sm'
-        : 'border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--fg-secondary)] hover:border-[var(--border-default)] hover:text-[var(--fg-primary)]'
+        ? 'border-[var(--color-brand)] text-[var(--color-text)]'
+        : 'border-transparent text-[var(--color-text-muted)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text)]'
+    }`;
+
+  // Secondary sub-navigation segmented items
+  const subNavTabClass = (active: boolean) =>
+    `inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+      active
+        ? 'bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm border border-[var(--color-border)]'
+        : 'border border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text)]'
     }`;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {/* Page Header */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-[var(--fg-primary)]">
+          <h1 className="text-xl font-semibold tracking-tight text-[var(--color-text)]">
             Audience &amp; Email Marketing
           </h1>
-          <p className="mt-1 text-sm text-[var(--fg-muted)]">
-            One unified subscriber audience organized by tags, custom fields, and dynamic segments — powering broadcasts, drip sequences, visual automations, and signup forms.
+          <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+            One unified subscriber audience organized by central tags, custom fields, and dynamic segments — powering broadcasts, drip sequences, visual automations, and growth forms.
           </p>
         </div>
       </div>
@@ -107,13 +129,13 @@ export function CampaignsView() {
             setSection('audience');
             setAudienceTab('subscribers');
           }}
-          className="cursor-pointer p-3.5 hover:border-[var(--accent)] transition-colors"
+          className="cursor-pointer p-4 hover:border-[var(--color-brand)] transition-colors"
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--fg-muted)]">Subscribers</span>
-            <Users className="h-4 w-4 text-[var(--fg-muted)]" />
+            <span className="text-xs font-medium text-[var(--color-text-muted)]">Subscribers</span>
+            <Users className="h-4 w-4 text-[var(--color-text-muted)]" />
           </div>
-          <div className="mt-1 text-2xl font-semibold text-[var(--fg-primary)]">
+          <div className="mt-1.5 text-2xl font-semibold text-[var(--color-text)]">
             {subscribersSummary.data?.total ?? '—'}
           </div>
         </Card>
@@ -123,13 +145,13 @@ export function CampaignsView() {
             setSection('marketing');
             setMarketingTab('broadcasts');
           }}
-          className="cursor-pointer p-3.5 hover:border-[var(--accent)] transition-colors"
+          className="cursor-pointer p-4 hover:border-[var(--color-brand)] transition-colors"
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--fg-muted)]">Broadcasts</span>
-            <Send className="h-4 w-4 text-[var(--fg-muted)]" />
+            <span className="text-xs font-medium text-[var(--color-text-muted)]">Broadcasts</span>
+            <Send className="h-4 w-4 text-[var(--color-text-muted)]" />
           </div>
-          <div className="mt-1 text-2xl font-semibold text-[var(--fg-primary)]">
+          <div className="mt-1.5 text-2xl font-semibold text-[var(--color-text)]">
             {campaignsSummary.data?.campaigns.length ?? '—'}
           </div>
         </Card>
@@ -139,13 +161,13 @@ export function CampaignsView() {
             setSection('marketing');
             setMarketingTab('sequences');
           }}
-          className="cursor-pointer p-3.5 hover:border-[var(--accent)] transition-colors"
+          className="cursor-pointer p-4 hover:border-[var(--color-brand)] transition-colors"
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--fg-muted)]">Sequences</span>
-            <ListOrdered className="h-4 w-4 text-[var(--fg-muted)]" />
+            <span className="text-xs font-medium text-[var(--color-text-muted)]">Sequences</span>
+            <ListOrdered className="h-4 w-4 text-[var(--color-text-muted)]" />
           </div>
-          <div className="mt-1 text-2xl font-semibold text-[var(--fg-primary)]">
+          <div className="mt-1.5 text-2xl font-semibold text-[var(--color-text)]">
             {sequencesSummary.data?.sequences.length ?? '—'}
           </div>
         </Card>
@@ -155,94 +177,54 @@ export function CampaignsView() {
             setSection('automations');
             setAutomationTab('builder');
           }}
-          className="cursor-pointer p-3.5 hover:border-[var(--accent)] transition-colors"
+          className="cursor-pointer p-4 hover:border-[var(--color-brand)] transition-colors"
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--fg-muted)]">Automations</span>
-            <Workflow className="h-4 w-4 text-[var(--fg-muted)]" />
+            <span className="text-xs font-medium text-[var(--color-text-muted)]">Automations</span>
+            <Workflow className="h-4 w-4 text-[var(--color-text-muted)]" />
           </div>
-          <div className="mt-1 text-2xl font-semibold text-[var(--fg-primary)]">
+          <div className="mt-1.5 text-2xl font-semibold text-[var(--color-text)]">
             {automationsSummary.data?.automations.length ?? '—'}
           </div>
         </Card>
       </div>
 
-      {/* Primary Domain Navigation (4 Clear Pillars) */}
-      <div className="flex flex-wrap gap-2 border-b border-[var(--border-subtle)] pb-3">
-        <button
-          type="button"
-          onClick={() => setSection('audience')}
-          className={pillButtonClass(section === 'audience')}
-        >
-          <Users className="h-3.5 w-3.5" /> Audience
+      {/* Primary Domain Navigation Bar */}
+      <nav aria-label="Marketing workspace sections" className="flex flex-wrap gap-2 border-b border-[var(--color-border)]">
+        <button type="button" onClick={() => setSection('audience')} className={topNavTabClass(section === 'audience')}>
+          <Users className="h-4 w-4" /> Audience
         </button>
-        <button
-          type="button"
-          onClick={() => setSection('marketing')}
-          className={pillButtonClass(section === 'marketing')}
-        >
-          <Mail className="h-3.5 w-3.5" /> Email Marketing
+        <button type="button" onClick={() => setSection('marketing')} className={topNavTabClass(section === 'marketing')}>
+          <Mail className="h-4 w-4" /> Email Marketing
         </button>
-        <button
-          type="button"
-          onClick={() => setSection('automations')}
-          className={pillButtonClass(section === 'automations')}
-        >
-          <Workflow className="h-3.5 w-3.5" /> Automations
+        <button type="button" onClick={() => setSection('automations')} className={topNavTabClass(section === 'automations')}>
+          <Workflow className="h-4 w-4" /> Automations
         </button>
-        <button
-          type="button"
-          onClick={() => setSection('growth')}
-          className={pillButtonClass(section === 'growth')}
-        >
-          <Globe className="h-3.5 w-3.5" /> Growth
+        <button type="button" onClick={() => setSection('growth')} className={topNavTabClass(section === 'growth')}>
+          <Globe className="h-4 w-4" /> Growth
         </button>
-      </div>
+      </nav>
 
       {/* Secondary Context Tabs */}
       {section === 'audience' && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              onClick={() => setAudienceTab('subscribers')}
-              className={pillButtonClass(audienceTab === 'subscribers')}
-            >
+        <div className="space-y-5">
+          <div className="inline-flex flex-wrap gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-1">
+            <button type="button" onClick={() => setAudienceTab('subscribers')} className={subNavTabClass(audienceTab === 'subscribers')}>
               <Users className="h-3.5 w-3.5" /> Subscribers
             </button>
-            <button
-              type="button"
-              onClick={() => setAudienceTab('tags')}
-              className={pillButtonClass(audienceTab === 'tags')}
-            >
+            <button type="button" onClick={() => setAudienceTab('tags')} className={subNavTabClass(audienceTab === 'tags')}>
               <Tag className="h-3.5 w-3.5" /> Tags
             </button>
-            <button
-              type="button"
-              onClick={() => setAudienceTab('segments')}
-              className={pillButtonClass(audienceTab === 'segments')}
-            >
+            <button type="button" onClick={() => setAudienceTab('segments')} className={subNavTabClass(audienceTab === 'segments')}>
               <Filter className="h-3.5 w-3.5" /> Segments
             </button>
-            <button
-              type="button"
-              onClick={() => setAudienceTab('custom-fields')}
-              className={pillButtonClass(audienceTab === 'custom-fields')}
-            >
+            <button type="button" onClick={() => setAudienceTab('custom-fields')} className={subNavTabClass(audienceTab === 'custom-fields')}>
               <SlidersHorizontal className="h-3.5 w-3.5" /> Custom Fields
             </button>
-            <button
-              type="button"
-              onClick={() => setAudienceTab('import-export')}
-              className={pillButtonClass(audienceTab === 'import-export')}
-            >
+            <button type="button" onClick={() => setAudienceTab('import-export')} className={subNavTabClass(audienceTab === 'import-export')}>
               <Upload className="h-3.5 w-3.5" /> Import / Export
             </button>
-            <button
-              type="button"
-              onClick={() => setAudienceTab('suppressions')}
-              className={pillButtonClass(audienceTab === 'suppressions')}
-            >
+            <button type="button" onClick={() => setAudienceTab('suppressions')} className={subNavTabClass(audienceTab === 'suppressions')}>
               <Ban className="h-3.5 w-3.5" /> Suppressions
             </button>
           </div>
@@ -252,6 +234,7 @@ export function CampaignsView() {
               initialTagFilter={tagFilterShortcut}
               onClearInitialTag={() => setTagFilterShortcut(undefined)}
               onOpenImportWizard={handleOpenImportWizard}
+              onOpenTagManager={handleOpenTagManager}
             />
           )}
           {audienceTab === 'tags' && <TagsSection onViewSubscribersWithTag={handleViewSubscribersWithTag} />}
@@ -263,34 +246,18 @@ export function CampaignsView() {
       )}
 
       {section === 'marketing' && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              onClick={() => setMarketingTab('broadcasts')}
-              className={pillButtonClass(marketingTab === 'broadcasts')}
-            >
+        <div className="space-y-5">
+          <div className="inline-flex flex-wrap gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-1">
+            <button type="button" onClick={() => setMarketingTab('broadcasts')} className={subNavTabClass(marketingTab === 'broadcasts')}>
               <Send className="h-3.5 w-3.5" /> Broadcasts
             </button>
-            <button
-              type="button"
-              onClick={() => setMarketingTab('sequences')}
-              className={pillButtonClass(marketingTab === 'sequences')}
-            >
+            <button type="button" onClick={() => setMarketingTab('sequences')} className={subNavTabClass(marketingTab === 'sequences')}>
               <ListOrdered className="h-3.5 w-3.5" /> Sequences
             </button>
-            <button
-              type="button"
-              onClick={() => setMarketingTab('templates')}
-              className={pillButtonClass(marketingTab === 'templates')}
-            >
+            <button type="button" onClick={() => setMarketingTab('templates')} className={subNavTabClass(marketingTab === 'templates')}>
               <FileCode2 className="h-3.5 w-3.5" /> Templates
             </button>
-            <button
-              type="button"
-              onClick={() => setMarketingTab('analytics')}
-              className={pillButtonClass(marketingTab === 'analytics')}
-            >
+            <button type="button" onClick={() => setMarketingTab('analytics')} className={subNavTabClass(marketingTab === 'analytics')}>
               <BarChart3 className="h-3.5 w-3.5" /> Campaign Analytics
             </button>
           </div>
@@ -303,20 +270,12 @@ export function CampaignsView() {
       )}
 
       {section === 'automations' && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              onClick={() => setAutomationTab('builder')}
-              className={pillButtonClass(automationTab === 'builder')}
-            >
+        <div className="space-y-5">
+          <div className="inline-flex flex-wrap gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-1">
+            <button type="button" onClick={() => setAutomationTab('builder')} className={subNavTabClass(automationTab === 'builder')}>
               <Workflow className="h-3.5 w-3.5" /> Visual Automations
             </button>
-            <button
-              type="button"
-              onClick={() => setAutomationTab('activity')}
-              className={pillButtonClass(automationTab === 'activity')}
-            >
+            <button type="button" onClick={() => setAutomationTab('activity')} className={subNavTabClass(automationTab === 'activity')}>
               <Activity className="h-3.5 w-3.5" /> Automation Activity
             </button>
           </div>
@@ -326,20 +285,12 @@ export function CampaignsView() {
       )}
 
       {section === 'growth' && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              onClick={() => setGrowthTab('forms')}
-              className={pillButtonClass(growthTab === 'forms')}
-            >
+        <div className="space-y-5">
+          <div className="inline-flex flex-wrap gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-muted)] p-1">
+            <button type="button" onClick={() => setGrowthTab('forms')} className={subNavTabClass(growthTab === 'forms')}>
               <FileInput className="h-3.5 w-3.5" /> Forms
             </button>
-            <button
-              type="button"
-              onClick={() => setGrowthTab('landing-pages')}
-              className={pillButtonClass(growthTab === 'landing-pages')}
-            >
+            <button type="button" onClick={() => setGrowthTab('landing-pages')} className={subNavTabClass(growthTab === 'landing-pages')}>
               <Globe className="h-3.5 w-3.5" /> Landing Pages
             </button>
           </div>

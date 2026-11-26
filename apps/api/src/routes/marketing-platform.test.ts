@@ -460,4 +460,176 @@ describe('Kit-Inspired Email Marketing Platform API', () => {
     assert.equal(pubLp.status, 200);
     assert.equal(((await pubLp.json()) as { landingPage: { viewsCount: number } }).landingPage.viewsCount, 1);
   });
+
+  it('enforces broadcast draft optimistic concurrency, duplication, test isolation, and live tagId automation sync', async () => {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${orgAToken}` };
+
+    // 1. Create centralized tags and verify live rename synchronization via tagId
+    const tTriggerRes = await fetch(`${baseUrl}/v1/tags`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ name: 'InitialVIP', color: '#2563eb' }),
+    });
+    assert.equal(tTriggerRes.status, 201);
+    const { tag: triggerTag } = (await tTriggerRes.json()) as { tag: { id: string; name: string } };
+
+    const tActionRes = await fetch(`${baseUrl}/v1/tags`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ name: 'FollowerOriginal', color: '#10b981' }),
+    });
+    assert.equal(tActionRes.status, 201);
+    const { tag: actionTag } = (await tActionRes.json()) as { tag: { id: string; name: string } };
+
+    // Create published automation referencing tagId for both trigger and action
+    const autoRes = await fetch(`${baseUrl}/v1/automations`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({
+        name: 'VIP Live Tag Sync',
+        triggerType: 'tag_added',
+        triggerConfig: { tagId: triggerTag.id, tagName: triggerTag.name },
+        nodes: [
+          { id: 'n1', type: 'trigger', label: 'VIP Tag Added', x: 40, y: 40, config: { tagId: triggerTag.id } },
+          { id: 'n2', type: 'action_add_tag', label: 'Add Follower Tag', x: 40, y: 140, config: { tagId: actionTag.id, tagName: actionTag.name } },
+          { id: 'n3', type: 'end', label: 'End', x: 40, y: 240, config: {} },
+        ],
+        edges: [
+          { id: 'e1', source: 'n1', target: 'n2', branch: 'next' },
+          { id: 'e2', source: 'n2', target: 'n3', branch: 'next' },
+        ],
+      }),
+    });
+    assert.equal(autoRes.status, 201);
+    const { automation: liveAuto } = (await autoRes.json()) as { automation: { id: string } };
+    await fetch(`${baseUrl}/v1/automations/${liveAuto.id}`, {
+      method: 'PATCH',
+      headers: h,
+      body: JSON.stringify({ status: 'published' }),
+    });
+
+    // Rename central tags BEFORE triggering bulk tag action
+    await fetch(`${baseUrl}/v1/tags/${triggerTag.id}`, {
+      method: 'PATCH',
+      headers: h,
+      body: JSON.stringify({ name: 'RenamedVIP' }),
+    });
+    await fetch(`${baseUrl}/v1/tags/${actionTag.id}`, {
+      method: 'PATCH',
+      headers: h,
+      body: JSON.stringify({ name: 'FollowerRenamed' }),
+    });
+
+    const subCreate = await fetch(`${baseUrl}/v1/subscribers`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ email: 'vip-sync@example.com', firstName: 'Vip', consentSource: 'manual' }),
+    });
+    assert.equal(subCreate.status, 201);
+    const { subscriber: vipSub } = (await subCreate.json()) as { subscriber: { id: string } };
+
+    const bulkRes = await fetch(`${baseUrl}/v1/subscribers/bulk`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ action: 'add_tag', tagId: triggerTag.id, ids: [vipSub.id] }),
+    });
+    assert.equal(bulkRes.status, 200);
+
+    const subAfter = await fetch(`${baseUrl}/v1/subscribers/${vipSub.id}`, { headers: h });
+    assert.equal(subAfter.status, 200);
+    const { subscriber: vipAfter } = (await subAfter.json()) as { subscriber: { tags: string[] } };
+    assert.ok(vipAfter.tags.includes('RenamedVIP'));
+    assert.ok(vipAfter.tags.includes('FollowerRenamed'));
+
+    // 2. Broadcast draft optimistic concurrency, duplication, test isolation, and locked state
+    const draftRes = await fetch(`${baseUrl}/v1/campaigns`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({
+        domainId: verifiedDomainId,
+        name: 'Autosave Draft V1',
+        fromName: 'FastConnect QA',
+        subject: 'First Subject',
+        htmlBody: '<p>Hello {{firstName}}</p>',
+        audienceSpec: { mode: 'filtered', includeTags: ['RenamedVIP'] },
+      }),
+    });
+    assert.equal(draftRes.status, 201);
+    const { campaign: draft1 } = (await draftRes.json()) as {
+      campaign: { id: string; updatedAt: string; status: string };
+    };
+    assert.ok(draft1.updatedAt);
+
+    // GET single broadcast
+    const getOne = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}`, { headers: h });
+    assert.equal(getOne.status, 200);
+
+    // Valid autosave PATCH with matching expectedUpdatedAt
+    const patchOk = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}`, {
+      method: 'PATCH',
+      headers: h,
+      body: JSON.stringify({
+        subject: 'Updated Subject',
+        expectedUpdatedAt: draft1.updatedAt,
+      }),
+    });
+    assert.equal(patchOk.status, 200);
+    const { campaign: draft2 } = (await patchOk.json()) as {
+      campaign: { id: string; updatedAt: string; subject: string };
+    };
+    assert.equal(draft2.subject, 'Updated Subject');
+
+    // Stale expectedUpdatedAt returns 409 DRAFT_CONFLICT with details.latestCampaign
+    const patchConflict = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}`, {
+      method: 'PATCH',
+      headers: h,
+      body: JSON.stringify({
+        subject: 'Stale Overwrite Attempt',
+        expectedUpdatedAt: '2020-01-01T00:00:00.000Z',
+      }),
+    });
+    assert.equal(patchConflict.status, 409);
+    const conflictBody = (await patchConflict.json()) as {
+      error: { code: string; details?: { latestCampaign?: { subject: string; updatedAt: string } } };
+    };
+    assert.equal(conflictBody.error.code, 'DRAFT_CONFLICT');
+    assert.equal(conflictBody.error.details?.latestCampaign?.subject, 'Updated Subject');
+
+    // Send Test must NOT contaminate campaign analytics or set campaignId
+    const testSendIdx = submittedEmails.length;
+    const testSend = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}/send-test`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ toEmail: 'preview@brand-a.test' }),
+    });
+    assert.equal(testSend.status, 200);
+    assert.equal(submittedEmails[testSendIdx]?.campaignId, undefined);
+    const preAna = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}/analytics`, { headers: h });
+    assert.equal(((await preAna.json()) as { analytics: { sent: number } }).analytics.sent, 0);
+
+    // Duplicate draft creates an independent copy in draft status
+    const dupRes = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}/duplicate`, {
+      method: 'POST',
+      headers: h,
+      body: '{}',
+    });
+    assert.equal(dupRes.status, 201);
+    const { campaign: copiedDraft } = (await dupRes.json()) as {
+      campaign: { id: string; name: string; status: string };
+    };
+    assert.notEqual(copiedDraft.id, draft1.id);
+    assert.equal(copiedDraft.status, 'draft');
+    assert.ok(copiedDraft.name.includes('(Copy)'));
+
+    // Start broadcast -> completed broadcast rejects draft mutations with 409 CAMPAIGN_LOCKED
+    const startDraft = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}/start`, { method: 'POST', headers: h });
+    assert.equal(startDraft.status, 200);
+    const lockedPatch = await fetch(`${baseUrl}/v1/campaigns/${draft1.id}`, {
+      method: 'PATCH',
+      headers: h,
+      body: JSON.stringify({ subject: 'After Send Edit' }),
+    });
+    assert.equal(lockedPatch.status, 409);
+    assert.equal(((await lockedPatch.json()) as { error: { code: string } }).error.code, 'CAMPAIGN_LOCKED');
+  });
 });

@@ -156,7 +156,7 @@ export function TemplatesStudioSection() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative w-64">
-            <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-[var(--fg-muted)]" />
+            <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-[var(--color-text-muted)]" />
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -169,13 +169,13 @@ export function TemplatesStudioSection() {
             variant={includeArchived ? 'primary' : 'secondary'}
             onClick={() => setIncludeArchived((v) => !v)}
           >
-            <Archive className="mr-1.5 h-3.5 w-3.5" />
+            <Archive className="h-3.5 w-3.5" />
             {includeArchived ? 'Showing Archived' : 'Show Archived'}
           </Button>
         </div>
 
         <Button onClick={openNewTemplate}>
-          <Plus className="mr-1.5 h-4 w-4" /> New Email Template
+          <Plus className="h-4 w-4" /> New Email Template
         </Button>
       </div>
 
@@ -192,7 +192,7 @@ export function TemplatesStudioSection() {
           description="Create reusable visual or HTML email templates with personalization variables and plain-text fallbacks."
           action={
             <Button onClick={openNewTemplate}>
-              <Plus className="mr-1.5 h-4 w-4" /> Create First Template
+              <Plus className="h-4 w-4" /> Create First Template
             </Button>
           }
         />
@@ -206,8 +206,8 @@ export function TemplatesStudioSection() {
                 <div className="space-y-2">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <h3 className="text-sm font-semibold text-[var(--fg-primary)]">{tpl.name}</h3>
-                      <p className="text-xs text-[var(--fg-muted)] mt-0.5 line-clamp-1">{ver.subject}</p>
+                      <h3 className="text-sm font-semibold text-[var(--color-text)]">{tpl.name}</h3>
+                      <p className="text-xs text-[var(--color-text-muted)] mt-0.5 line-clamp-1">{ver.subject}</p>
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       <Badge tone="neutral">v{tpl.activeVersion}</Badge>
@@ -223,41 +223,45 @@ export function TemplatesStudioSection() {
                     )}
                   </div>
                   {tpl.description && (
-                    <p className="text-xs text-[var(--fg-secondary)] line-clamp-2">{tpl.description}</p>
+                    <p className="text-xs text-[var(--color-text-muted)] line-clamp-2">{tpl.description}</p>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-3">
-                  <span className="text-[11px] text-[var(--fg-muted)]">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3">
+                  <span className="text-[11px] text-[var(--color-text-muted)]">
                     Updated {new Date(tpl.updatedAt ?? tpl.createdAt).toLocaleDateString()}
                   </span>
                   <div className="flex items-center gap-1">
                     <Button size="sm" variant="secondary" onClick={() => openEditTemplate(tpl)}>
-                      <Pencil className="mr-1 h-3 w-3" /> Edit
+                      <Pencil className="h-3 w-3" /> Edit
                     </Button>
                     <Button
-                      size="sm"
-                      variant="secondary"
+                      size="icon"
+                      variant="ghost"
                       onClick={() => duplicateMutation.mutate(tpl.id)}
                       title="Duplicate template"
+                      aria-label={`Duplicate ${tpl.name}`}
                     >
                       <Copy className="h-3.5 w-3.5" />
                     </Button>
                     <Button
-                      size="sm"
-                      variant="secondary"
+                      size="icon"
+                      variant="ghost"
                       onClick={() => archiveMutation.mutate({ id: tpl.id, archived: !isArchived })}
                       title={isArchived ? 'Restore template' : 'Archive template'}
+                      aria-label={isArchived ? `Restore ${tpl.name}` : `Archive ${tpl.name}`}
                     >
                       {isArchived ? <RotateCcw className="h-3.5 w-3.5" /> : <Archive className="h-3.5 w-3.5" />}
                     </Button>
                     <Button
-                      size="sm"
-                      variant="secondary"
+                      size="icon"
+                      variant="ghost"
                       onClick={() => setDeleteTarget(tpl)}
                       title="Delete template"
+                      aria-label={`Delete ${tpl.name}`}
+                      className="text-[var(--color-danger)] hover:text-[var(--color-danger)]"
                     >
-                      <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                      <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   </div>
                 </div>
@@ -267,20 +271,19 @@ export function TemplatesStudioSection() {
         </div>
       )}
 
-      {/* Template Studio Editor Dialog */}
       <AppDialog
         open={editorOpen}
         onOpenChange={setEditorOpen}
         title={editingId ? 'Edit Email Template' : 'Create Email Template'}
         maxWidthClass="max-w-5xl"
       >
-        <div className="max-h-[78vh] overflow-y-auto space-y-4 pr-1">
-          <p className="text-xs text-[var(--fg-muted)]">
+        <div className="max-h-[82vh] overflow-y-auto space-y-4 pr-1">
+          <p className="text-xs text-[var(--color-text-muted)]">
             Build with structured email blocks or edit sanitized HTML + plain-text directly.
           </p>
           <div className="grid gap-3 md:grid-cols-3">
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Template Name</label>
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Template Name</label>
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -288,7 +291,7 @@ export function TemplatesStudioSection() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Category</label>
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Category</label>
               <select
                 value={category}
                 onChange={(e) =>
@@ -296,7 +299,7 @@ export function TemplatesStudioSection() {
                     e.target.value as 'newsletter' | 'onboarding' | 'product' | 'transactional' | 'custom'
                   )
                 }
-                className="w-full rounded-md border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-sm text-[var(--fg-primary)]"
+                className="h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 text-sm text-[var(--color-text)]"
               >
                 <option value="newsletter">Newsletter</option>
                 <option value="onboarding">Onboarding</option>
@@ -306,7 +309,7 @@ export function TemplatesStudioSection() {
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-[var(--fg-muted)]">Notes / Description</label>
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Notes / Description</label>
               <Input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
@@ -330,7 +333,7 @@ export function TemplatesStudioSection() {
             }}
           />
 
-          <div className="flex justify-end gap-2 border-t border-[var(--border-subtle)] pt-3">
+          <div className="flex justify-end gap-2 border-t border-[var(--color-border)] pt-3">
             <Button variant="secondary" onClick={() => setEditorOpen(false)}>
               Cancel
             </Button>
@@ -344,7 +347,6 @@ export function TemplatesStudioSection() {
         </div>
       </AppDialog>
 
-      {/* Delete Confirmation Dialog */}
       <AppDialog
         open={Boolean(deleteTarget)}
         onOpenChange={(open) => {
@@ -353,7 +355,7 @@ export function TemplatesStudioSection() {
         title="Delete Template"
       >
         <div className="space-y-3">
-          <p className="text-xs text-[var(--fg-secondary)]">
+          <p className="text-xs text-[var(--color-text-muted)]">
             Are you sure you want to permanently delete &ldquo;{deleteTarget?.name ?? ''}&rdquo;?
           </p>
           <div className="flex justify-end gap-2 pt-2">
@@ -361,7 +363,7 @@ export function TemplatesStudioSection() {
               Cancel
             </Button>
             <Button
-              variant="primary"
+              variant="danger"
               disabled={deleteMutation.isPending}
               onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
             >

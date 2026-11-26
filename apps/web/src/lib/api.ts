@@ -325,6 +325,7 @@ export interface CampaignItem {
   completedAt?: string | null | undefined;
   failureReason?: string | null | undefined;
   createdAt: string;
+  updatedAt?: string | undefined;
 }
 
 export interface SuppressionItem {
@@ -613,6 +614,7 @@ export const api = {
   bulkSubscribersAction: (body: {
     ids: string[];
     action: 'add_tag' | 'remove_tag' | 'unsubscribe' | 'delete';
+    tagId?: string | undefined;
     tagName?: string | undefined;
   }) => apiFetch<{ affected: number }>('/v1/subscribers/bulk', { method: 'POST', body: JSON.stringify(body) }),
   importSubscribersCsv: (body: {
@@ -679,6 +681,9 @@ export const api = {
     }),
 
   listCampaigns: () => apiFetch<{ campaigns: CampaignItem[] }>('/v1/campaigns'),
+  getCampaign: (id: string) => apiFetch<{ campaign: CampaignItem }>(`/v1/campaigns/${id}`),
+  duplicateCampaign: (id: string) =>
+    apiFetch<{ campaign: CampaignItem }>(`/v1/campaigns/${id}/duplicate`, { method: 'POST' }),
   estimateCampaignAudience: (spec: AudienceSelectionSpec) =>
     apiFetch<{ estimate: AudienceEstimate; sample: SubscriberRecord[] }>('/v1/campaigns/estimate-audience', {
       method: 'POST',

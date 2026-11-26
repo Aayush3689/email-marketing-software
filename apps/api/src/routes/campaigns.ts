@@ -91,6 +91,7 @@ export interface CampaignRecord {
   completedAt?: string | null | undefined;
   failureReason?: string | null | undefined;
   createdAt: string;
+  updatedAt?: string | undefined;
 }
 
 export interface SuppressionRecord {
@@ -282,8 +283,10 @@ export interface MarketingStore {
       timezone: string;
       scheduledAt: string | null;
       status: CampaignRecord['status'];
+      expectedUpdatedAt?: string | undefined;
     }>
   ): Promise<CampaignRecord | null> | CampaignRecord | null;
+  duplicateCampaign?(orgId: string, id: string): Promise<CampaignRecord | null> | CampaignRecord | null;
   deleteCampaign?(orgId: string, id: string): Promise<boolean> | boolean;
   transitionCampaign(orgId: string, id: string, status: CampaignRecord['status']): Promise<CampaignRecord | null> | CampaignRecord | null;
   markCampaignDispatched?(orgId: string, id: string, sentCount: number, failedReason?: string): Promise<CampaignRecord | null> | CampaignRecord | null;
@@ -1206,12 +1209,13 @@ export class InMemoryMarketingStore implements MarketingStore {
       targetCount: estimate.eligibleCount,
       sentCount: 0,
       createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
     this.campaigns.set(rec.id, rec);
     return rec;
   }
 
-  updateCampaign(
+  async updateCampaign(
     orgId: string,
     id: string,
     patch: Partial<{
@@ -1230,18 +1234,49 @@ export class InMemoryMarketingStore implements MarketingStore {
       timezone: string;
       scheduledAt: string | null;
       status: CampaignRecord['status'];
+      expectedUpdatedAt?: string | undefined;
     }>
-  ): CampaignRecord | null {
+  ): Promise<CampaignRecord | null> {
     const c = this.campaigns.get(id);
     if (!c || c.organizationId !== orgId) return null;
-    if (c.status === 'completed' || c.status === 'sending' || c.status === 'running') {
-      throw new AppError(400, 'CAMPAIGN_LOCKED', 'Cannot edit a campaign after sending has started');
+    if (c.status === 'completed' || c.status === 'sending' || c.status === 'running' || c.status === 'cancelled') {
+      throw new AppError(409, 'CAMPAIGN_LOCKED', `Cannot edit a ${c.status} broadcast`);
     }
-    Object.assign(c, patch);
+    if (patch.expectedUpdatedAt && c.updatedAt && patch.expectedUpdatedAt !== c.updatedAt) {
+      throw new AppError(409, 'DRAFT_CONFLICT', 'Broadcast draft was updated in another session', { latestCampaign: c });
+    }
+    const { expectedUpdatedAt: _ignored, ...rest } = patch;
+    Object.assign(c, rest);
     if (patch.htmlBody !== undefined && patch.htmlBody !== null) {
       c.htmlBody = sanitizeMarketingHtml(patch.htmlBody);
     }
-    return c;
+    if (patch.audienceSpec) {
+      const { estimate } = await this.estimateBroadcastAudience(orgId, patch.audienceSpec);
+      c.targetCount = estimate.eligibleCount;
+    }
+    c.updatedAt = new Date().toISOString();
+    return { ...c };
+  }
+
+  duplicateCampaign(orgId: string, id: string): CampaignRecord | null {
+    const src = this.campaigns.get(id);
+    if (!src || src.organizationId !== orgId) return null;
+    const now = new Date().toISOString();
+    const copy: CampaignRecord = {
+      ...src,
+      id: randomUUID(),
+      name: `${src.name} (Copy)`,
+      status: 'draft',
+      scheduledAt: null,
+      sentCount: 0,
+      dispatchedAt: null,
+      completedAt: null,
+      failureReason: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.campaigns.set(copy.id, copy);
+    return { ...copy };
   }
 
   deleteCampaign(orgId: string, id: string): boolean {
@@ -1628,10 +1663,17 @@ export class InMemoryMarketingStore implements MarketingStore {
       steps += 1;
       if (visited.has(current.id)) break;
       visited.add(current.id);
-      if (current.type === 'action_add_tag' && typeof current.config.tagName === 'string') {
-        this.updateSubscriber(orgId, sub.id, { addTags: [current.config.tagName] });
-      } else if (current.type === 'action_remove_tag' && typeof current.config.tagName === 'string') {
-        this.updateSubscriber(orgId, sub.id, { removeTags: [current.config.tagName] });
+      const resolvedTag = (conf: Record<string, unknown>): string | null => {
+        if (typeof conf.tagId === 'string' && conf.tagId) {
+          return this.tags.get(conf.tagId)?.name ?? (typeof conf.tagName === 'string' ? conf.tagName : null);
+        }
+        return typeof conf.tagName === 'string' ? conf.tagName : null;
+      };
+      const tagTarget = resolvedTag(current.config);
+      if (current.type === 'action_add_tag' && tagTarget) {
+        this.updateSubscriber(orgId, sub.id, { addTags: [tagTarget] });
+      } else if (current.type === 'action_remove_tag' && tagTarget) {
+        this.updateSubscriber(orgId, sub.id, { removeTags: [tagTarget] });
       } else if (current.type === 'action_update_field' && typeof current.config.fieldKey === 'string') {
         this.updateSubscriber(orgId, sub.id, {
           attributes: { [current.config.fieldKey]: String(current.config.value ?? '') },
@@ -1642,8 +1684,8 @@ export class InMemoryMarketingStore implements MarketingStore {
         break;
       }
       let nextEdge = a.edges.find((e) => e.source === current!.id && (!e.branch || e.branch === 'next'));
-      if (current.type === 'condition' && typeof current.config.tagName === 'string') {
-        const hasTag = sub.tags.some((t) => t.toLowerCase() === String(current!.config.tagName).toLowerCase());
+      if (current.type === 'condition' && tagTarget) {
+        const hasTag = sub.tags.some((t) => t.toLowerCase() === tagTarget.toLowerCase());
         nextEdge = a.edges.find((e) => e.source === current!.id && e.branch === (hasTag ? 'yes' : 'no'));
       }
       current = nextEdge ? a.nodes.find((n) => n.id === nextEdge.target) : undefined;
@@ -1674,10 +1716,15 @@ export class InMemoryMarketingStore implements MarketingStore {
     let launched = 0;
     for (const a of this.automations.values()) {
       if (a.organizationId !== orgId || a.status !== 'published' || a.triggerType !== triggerType) continue;
-      if (triggerType === 'tag_added' && a.triggerConfig.tagName) {
-        const expected = String(a.triggerConfig.tagName).toLowerCase();
+      if (triggerType === 'tag_added' && (a.triggerConfig.tagId || a.triggerConfig.tagName)) {
+        const expectedById =
+          typeof a.triggerConfig.tagId === 'string' && a.triggerConfig.tagId
+            ? this.tags.get(a.triggerConfig.tagId)?.name
+            : undefined;
+        const expected = String(expectedById ?? a.triggerConfig.tagName ?? '').toLowerCase();
         const actual = String(context?.tagName ?? '').toLowerCase();
-        if (actual && actual !== expected) continue;
+        if (expected && actual && actual !== expected) continue;
+        if (a.triggerConfig.tagId && context?.tagId && a.triggerConfig.tagId !== context.tagId) continue;
       }
       this.executeAutomationGraphSync(orgId, a, sub);
       launched += 1;
@@ -1900,6 +1947,7 @@ const createCampaignSchema = z.object({
 
 const updateCampaignSchema = createCampaignSchema.partial().extend({
   status: z.enum(['draft', 'scheduled', 'paused']).optional(),
+  expectedUpdatedAt: z.string().optional(),
 });
 
 export function createMarketingRouter(deps: {
@@ -2004,6 +2052,20 @@ export function createMarketingRouter(deps: {
 
   router.get('/campaigns', auth, requireOrgRole(['owner', 'admin', 'developer', 'read_only_analyst']), async (req, res) => {
     res.json({ campaigns: await deps.store.listCampaigns(req.auth!.orgId!) });
+  });
+
+  router.get('/campaigns/:id', auth, requireOrgRole(['owner', 'admin', 'developer', 'read_only_analyst']), async (req, res) => {
+    const campaigns = await deps.store.listCampaigns(req.auth!.orgId!);
+    const campaign = campaigns.find((c) => c.id === String(req.params.id ?? ''));
+    if (!campaign) throw new AppError(404, 'NOT_FOUND', 'Campaign not found');
+    res.json({ campaign });
+  });
+
+  router.post('/campaigns/:id/duplicate', auth, requireOrgRole(['owner', 'admin', 'developer']), async (req, res) => {
+    if (!deps.store.duplicateCampaign) throw new AppError(501, 'NOT_SUPPORTED', 'Campaign duplication not supported');
+    const copy = await deps.store.duplicateCampaign(req.auth!.orgId!, String(req.params.id ?? ''));
+    if (!copy) throw new AppError(404, 'NOT_FOUND', 'Campaign not found');
+    res.status(201).json({ campaign: copy });
   });
 
   router.post('/campaigns/estimate-audience', auth, requireOrgRole(['owner', 'admin', 'developer', 'read_only_analyst']), async (req, res) => {
