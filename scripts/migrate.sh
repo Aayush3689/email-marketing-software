@@ -23,7 +23,10 @@ SQL
 
 for file in "${ROOT_DIR}"/migrations/*.sql; do
     version="$(basename "$file")"
-    already_applied="$(run_psql -tAc "SELECT 1 FROM schema_migrations WHERE version = :'ver'" -v ver="$version")"
+    already_applied="$(run_psql -v ON_ERROR_STOP=1 -v ver="$version" -tA <<'SQL'
+SELECT 1 FROM schema_migrations WHERE version = :'ver';
+SQL
+)"
     if [[ "$already_applied" == "1" ]]; then
         echo "Skipping already applied migration: $version"
         continue
@@ -31,7 +34,9 @@ for file in "${ROOT_DIR}"/migrations/*.sql; do
 
     echo "Applying migration: $version"
     run_psql -v ON_ERROR_STOP=1 --single-transaction -f - < "$file"
-    run_psql -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations (version) VALUES (:'ver') ON CONFLICT DO NOTHING;" -v ver="$version"
+    run_psql -v ON_ERROR_STOP=1 -v ver="$version" <<'SQL'
+INSERT INTO schema_migrations (version) VALUES (:'ver') ON CONFLICT DO NOTHING;
+SQL
 done
 
 echo "All migrations applied successfully."
