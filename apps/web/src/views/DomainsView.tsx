@@ -53,10 +53,10 @@ export function DomainsView() {
   // Async diagnostic polling & safe delete state
   const [activeJob, setActiveJob] = useState<{ domainId: string; jobId: string; status: string } | null>(null);
   const [deleteDeps, setDeleteDeps] = useState<{
-    mailboxes?: number;
-    campaigns?: number;
+    mailboxCount?: number;
+    activeCampaignCount?: number;
+    recentMessagesCount?: number;
     smtpCredentials?: number;
-    messages?: number;
   } | null>(null);
 
   const listQuery = useQuery({
@@ -846,6 +846,7 @@ export function DomainsView() {
           <div className="space-y-1">
             <label className="font-medium text-[var(--color-text)]">Domain Name</label>
             <Input
+              autoFocus
               placeholder="mail.example.com or example.com"
               value={newDomain}
               onChange={(e) => setNewDomain(e.target.value)}

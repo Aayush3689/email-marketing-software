@@ -12,10 +12,10 @@ import { useState } from 'react';
 import type { DomainItem, DomainUpdatePatch } from '../../lib/api.js';
 
 interface DependencyCounts {
-  mailboxes?: number;
-  campaigns?: number;
+  mailboxCount?: number;
+  activeCampaignCount?: number;
+  recentMessagesCount?: number;
   smtpCredentials?: number;
-  messages?: number;
 }
 
 export function DomainActionsMenu({
@@ -71,6 +71,23 @@ export function DomainActionsMenu({
       <Button size="sm" variant="secondary" onClick={onRunDiagnostics} disabled={runningDiagnostics}>
         <SearchCheck className={`h-3.5 w-3.5 ${runningDiagnostics ? 'animate-pulse' : ''}`} />
         {runningDiagnostics ? 'Diagnosing...' : 'Full Check'}
+      </Button>
+
+      <Button
+        size="sm"
+        variant="ghost"
+        aria-label="Delete domain"
+        className="text-red-600 dark:text-red-400 hover:bg-red-500/10 hover:text-red-600"
+        onClick={() => {
+          setMenuOpen(false);
+          setConfirmName('');
+          setConfirmCleanup(false);
+          onClearDeleteDependencies();
+          setDeleteOpen(true);
+        }}
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+        Delete
       </Button>
 
       <div className="relative">
@@ -266,17 +283,17 @@ export function DomainActionsMenu({
             <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-300">
               <div className="font-semibold">Associated resources detected</div>
               <ul className="list-disc pl-4 space-y-0.5">
-                {typeof deleteDependencies.mailboxes === 'number' && deleteDependencies.mailboxes > 0 && (
-                  <li>{deleteDependencies.mailboxes} hosted mailbox(es)</li>
+                {typeof deleteDependencies.mailboxCount === 'number' && deleteDependencies.mailboxCount > 0 && (
+                  <li>{deleteDependencies.mailboxCount} hosted mailbox(es)</li>
                 )}
-                {typeof deleteDependencies.campaigns === 'number' && deleteDependencies.campaigns > 0 && (
-                  <li>{deleteDependencies.campaigns} campaign(s)</li>
+                {typeof deleteDependencies.activeCampaignCount === 'number' && deleteDependencies.activeCampaignCount > 0 && (
+                  <li>{deleteDependencies.activeCampaignCount} active campaign(s)</li>
                 )}
                 {typeof deleteDependencies.smtpCredentials === 'number' && deleteDependencies.smtpCredentials > 0 && (
                   <li>{deleteDependencies.smtpCredentials} domain-scoped SMTP credential(s)</li>
                 )}
-                {typeof deleteDependencies.messages === 'number' && deleteDependencies.messages > 0 && (
-                  <li>{deleteDependencies.messages} recorded email message(s)</li>
+                {typeof deleteDependencies.recentMessagesCount === 'number' && deleteDependencies.recentMessagesCount > 0 && (
+                  <li>{deleteDependencies.recentMessagesCount} queued/recent email message(s)</li>
                 )}
               </ul>
               <label className="flex items-center gap-2 pt-1 font-medium cursor-pointer">
@@ -295,6 +312,7 @@ export function DomainActionsMenu({
               Type <span className="font-mono">{domain.domainName}</span> to confirm
             </label>
             <Input
+              autoFocus
               placeholder={domain.domainName}
               value={confirmName}
               onChange={(e) => setConfirmName(e.target.value)}

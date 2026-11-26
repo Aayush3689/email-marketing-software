@@ -1011,7 +1011,18 @@ export class PgDomainStore implements DomainStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(`UPDATE messages SET domain_id = NULL WHERE organization_id = $1 AND domain_id = $2`, [orgId, domainId]);
+      await client.query(
+        `UPDATE messages
+            SET domain_id = NULL,
+                campaign_id = CASE
+                  WHEN campaign_id IN (SELECT id FROM campaigns WHERE organization_id = $1 AND domain_id = $2)
+                    THEN NULL
+                  ELSE campaign_id
+                END
+          WHERE organization_id = $1
+            AND (domain_id = $2 OR campaign_id IN (SELECT id FROM campaigns WHERE organization_id = $1 AND domain_id = $2))`,
+        [orgId, domainId]
+      );
       await client.query(`DELETE FROM campaigns WHERE organization_id = $1 AND domain_id = $2`, [orgId, domainId]);
       const del = await client.query(`DELETE FROM domains WHERE organization_id = $1 AND id = $2`, [orgId, domainId]);
       await client.query('COMMIT');
