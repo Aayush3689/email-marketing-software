@@ -93,14 +93,86 @@ model Domain {
   activeDkimSelector     String?   @map("active_dkim_selector")
   customReturnPathDomain String?   @map("custom_return_path_domain") @db.Citext
   customTrackingDomain   String?   @map("custom_tracking_domain") @db.Citext
+  defaultSenderLocalPart String?   @map("default_sender_local_part")
   dmarcPolicy            String    @default("none") @map("dmarc_policy")
+  dmarcRua               String?   @map("dmarc_rua")
+  dmarcRuf               String?   @map("dmarc_ruf")
+  dmarcPct               Int       @default(100) @map("dmarc_pct") @db.SmallInt
+  dmarcAspf              String    @default("r") @map("dmarc_aspf")
+  dmarcAdkim             String    @default("r") @map("dmarc_adkim")
+  dailySendLimit         Int?      @map("daily_send_limit")
+  mtaStsMode             String    @default("none") @map("mta_sts_mode")
+  mtaStsMaxAge           Int       @default(86400) @map("mta_sts_max_age")
+  tlsRptRua              String?   @map("tls_rpt_rua")
+  bimiSelector           String    @default("default") @map("bimi_selector")
+  bimiLogoUrl            String?   @map("bimi_logo_url")
+  bimiVmcUrl             String?   @map("bimi_vmc_url")
+  lastDnsCheckedAt       DateTime? @map("last_dns_checked_at") @db.Timestamptz
+  lastAuthPassedAt       DateTime? @map("last_auth_passed_at") @db.Timestamptz
   createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt              DateTime  @default(now()) @map("updated_at") @db.Timestamptz
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   mailboxes    Mailbox[]
+  dkimKeys     DkimKey[]
+  dnsChecks    DomainDnsCheck[]
+  dnsJobs      DomainDnsJob[]
 
   @@map("domains")
+}
+
+model DkimKey {
+  id                   String    @id @db.Uuid
+  domainId             String    @map("domain_id") @db.Uuid
+  selector             String
+  algorithm            String
+  publicKeyDnsTxt      String    @map("public_key_dns_txt")
+  encryptedPrivateKey  Bytes     @map("encrypted_private_key")
+  keyEncryptionVersion Int       @default(1) @map("key_encryption_version")
+  status               String    @default("active")
+  rotatedAt            DateTime? @map("rotated_at") @db.Timestamptz
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@unique([domainId, selector])
+  @@map("dkim_keys")
+}
+
+model DomainDnsCheck {
+  id         String   @id @db.Uuid
+  domainId   String   @map("domain_id") @db.Uuid
+  spfStatus  String   @map("spf_status")
+  dkimStatus String   @map("dkim_status")
+  dmarcStatus String  @map("dmarc_status")
+  mxStatus   String   @map("mx_status")
+  ptrStatus  String   @map("ptr_status")
+  details    Json     @default("{}")
+  checkedAt  DateTime @default(now()) @map("checked_at") @db.Timestamptz
+
+  domain Domain         @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  jobs   DomainDnsJob[]
+
+  @@map("domain_dns_checks")
+}
+
+model DomainDnsJob {
+  id             String    @id @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  domainId       String    @map("domain_id") @db.Uuid
+  status         String    @default("queued")
+  triggerSource  String    @default("manual") @map("trigger_source")
+  requestedBy    String?   @map("requested_by") @db.Uuid
+  resultCheckId  String?   @map("result_check_id") @db.Uuid
+  errorMessage   String?   @map("error_message")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  startedAt      DateTime? @map("started_at") @db.Timestamptz
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz
+
+  domain      Domain          @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  resultCheck DomainDnsCheck? @relation(fields: [resultCheckId], references: [id], onDelete: SetNull)
+
+  @@map("domain_dns_jobs")
 }
 
 model ApiKey {

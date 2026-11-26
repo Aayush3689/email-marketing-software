@@ -16,6 +16,7 @@ export interface EmailSubmissionStore {
     idempotencyKey?: string;
     traceparent?: string;
     from: string;
+    envelopeFrom?: string;
     recipients: string[];
     subject: string;
     bodyStorageKey: string;
@@ -153,6 +154,7 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
     idempotencyKey?: string;
     traceparent?: string;
     from: string;
+    envelopeFrom?: string;
     recipients: string[];
     subject: string;
     bodyStorageKey: string;
@@ -163,14 +165,26 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
       await client.query('BEGIN');
 
       const quotaRes = await client.query(
-        `SELECT status, daily_send_limit, monthly_send_limit,
+        `SELECT o.status, o.daily_send_limit, o.monthly_send_limit,
                 (SELECT COUNT(*)::int FROM message_recipients mr WHERE mr.organization_id = $1 AND mr.created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')) AS sent_today,
-                (SELECT COUNT(*)::int FROM message_recipients mr WHERE mr.organization_id = $1 AND mr.created_at >= date_trunc('month', NOW() AT TIME ZONE 'UTC')) AS sent_month
-           FROM organizations WHERE id = $1 LIMIT 1`,
-        [params.organizationId]
+                (SELECT COUNT(*)::int FROM message_recipients mr WHERE mr.organization_id = $1 AND mr.created_at >= date_trunc('month', NOW() AT TIME ZONE 'UTC')) AS sent_month,
+                d.daily_send_limit AS domain_daily_limit,
+                (SELECT COUNT(*)::int FROM message_recipients mr JOIN messages msg ON msg.id = mr.message_id WHERE msg.domain_id = $2 AND mr.created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC')) AS domain_sent_today
+           FROM organizations o
+           LEFT JOIN domains d ON d.id = $2
+          WHERE o.id = $1 LIMIT 1`,
+        [params.organizationId, params.domainId]
       );
       const orgRow = quotaRes.rows[0] as
-        | { status?: string; daily_send_limit?: number; monthly_send_limit?: number; sent_today?: number; sent_month?: number }
+        | {
+            status?: string;
+            daily_send_limit?: number;
+            monthly_send_limit?: number;
+            sent_today?: number;
+            sent_month?: number;
+            domain_daily_limit?: number | null;
+            domain_sent_today?: number;
+          }
         | undefined;
       if (orgRow) {
         if (orgRow.status === 'suspended') {
@@ -183,6 +197,10 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
         }
         if (monthlyLimit > 0 && Number(orgRow.sent_month ?? 0) + params.recipients.length > monthlyLimit) {
           throw new AppError(429, 'MONTHLY_QUOTA_EXCEEDED', 'Monthly sending quota exceeded');
+        }
+        const domainDailyLimit = orgRow.domain_daily_limit !== null && orgRow.domain_daily_limit !== undefined ? Number(orgRow.domain_daily_limit) : null;
+        if (domainDailyLimit !== null && domainDailyLimit >= 0 && Number(orgRow.domain_sent_today ?? 0) + params.recipients.length > domainDailyLimit) {
+          throw new AppError(429, 'DOMAIN_DAILY_QUOTA_EXCEEDED', 'Domain daily sending limit exceeded');
         }
       }
 
@@ -204,17 +222,19 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
       const messageId = uuidv7();
       const senderDomain = params.from.split('@')[1]?.toLowerCase() ?? 'mail.platform.local';
       const msgIdHeader = `<${messageId}@${senderDomain}>`;
+      const effectiveEnvelopeFrom = params.envelopeFrom ?? params.from;
 
       await client.query(
         `INSERT INTO messages (
            id, organization_id, domain_id, source_type, direction, idempotency_key,
            envelope_from, header_from, subject, message_id_header, body_storage_key, size_bytes, state
-         ) VALUES ($1, $2, $3, 'api', 'outbound', $4, $5::citext, $5::text, $6, $7, $8, $9, 'queued')`,
+         ) VALUES ($1, $2, $3, 'api', 'outbound', $4, $5::citext, $6::text, $7, $8, $9, $10, 'queued')`,
         [
           messageId,
           params.organizationId,
           params.domainId,
           params.idempotencyKey ?? null,
+          effectiveEnvelopeFrom,
           params.from,
           params.subject,
           msgIdHeader,
@@ -240,7 +260,7 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
           organizationId: params.organizationId,
           domainId: params.domainId,
           sourceType: 'api',
-          envelopeFrom: params.from,
+          envelopeFrom: effectiveEnvelopeFrom,
           recipientEmail,
           bodyStorageKey: params.bodyStorageKey,
           ipPoolId: null,
@@ -364,6 +384,7 @@ export function createEmailsRouter(deps: {
     const requestedDomainId = parsed.domainId ?? req.header('x-domain-id') ?? undefined;
 
     let resolvedDomainId = requestedDomainId ?? '';
+    let envelopeFromAddress = parsed.from;
     if (deps.domainStore) {
       const domain = requestedDomainId
         ? await deps.domainStore.getDomain(orgId, requestedDomainId)
@@ -382,6 +403,9 @@ export function createEmailsRouter(deps: {
         throw new AppError(403, 'SENDER_DOMAIN_MISMATCH', 'From address domain must match the verified domain');
       }
       resolvedDomainId = domain.id;
+      if (domain.customReturnPathDomain) {
+        envelopeFromAddress = `bounces+${domain.id}@${domain.customReturnPathDomain}`;
+      }
     } else if (!resolvedDomainId) {
       throw new AppError(400, 'MISSING_DOMAIN', 'Verified sending domain is required');
     }
@@ -421,6 +445,7 @@ export function createEmailsRouter(deps: {
         ...(parsed.idempotencyKey !== undefined ? { idempotencyKey: parsed.idempotencyKey } : {}),
         traceparent,
         from: parsed.from,
+        envelopeFrom: envelopeFromAddress,
         recipients,
         subject: parsed.subject,
         bodyStorageKey: storageKey,

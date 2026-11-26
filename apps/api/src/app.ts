@@ -14,7 +14,12 @@ import {
 import { type AuthStore, createAuthRouter } from './routes/auth.js';
 import { createMarketingRouter, type MarketingStore } from './routes/campaigns.js';
 import { createCredentialsRouter, type CredentialsStore } from './routes/credentials.js';
-import { createDomainsRouter, type DomainStore } from './routes/domains.js';
+import {
+  createDomainsRouter,
+  type DomainStore,
+  type MtaDomainSyncClient,
+} from './routes/domains.js';
+import type { DnsLookupAdapter } from './services/dns-verifier.js';
 import {
   buildBasicRfc5322Mime,
   createEmailsRouter,
@@ -33,6 +38,8 @@ export interface AppDependencies {
   jwtSecret?: string;
   authStore?: AuthStore;
   domainStore?: DomainStore;
+  dnsAdapter?: DnsLookupAdapter;
+  mtaDomainSync?: MtaDomainSyncClient;
   mailboxStore?: MailboxStore;
   credentialsStore?: CredentialsStore;
   marketingStore?: MarketingStore;
@@ -85,7 +92,15 @@ export function createApp(deps: AppDependencies): Express {
     app.use('/v1', createAuthRouter({ store: deps.authStore, jwtSecret: deps.jwtSecret }));
   }
   if (deps.jwtSecret && deps.domainStore) {
-    app.use('/v1', createDomainsRouter({ store: deps.domainStore, jwtSecret: deps.jwtSecret }));
+    app.use(
+      '/v1',
+      createDomainsRouter({
+        store: deps.domainStore,
+        jwtSecret: deps.jwtSecret,
+        ...(deps.dnsAdapter ? { dnsAdapter: deps.dnsAdapter } : {}),
+        ...(deps.mtaDomainSync ? { mtaSync: deps.mtaDomainSync } : {}),
+      })
+    );
   }
   if (deps.jwtSecret && deps.mailboxStore) {
     app.use('/v1', createMailboxesRouter({ store: deps.mailboxStore, jwtSecret: deps.jwtSecret }));
@@ -132,7 +147,11 @@ export function createApp(deps: AppDependencies): Express {
                         .replaceAll('{{firstName}}', contact.firstName || '')
                         .replaceAll('{{lastName}}', contact.lastName || '')
                         .replaceAll('{{email}}', contact.email);
-                    const fromAddr = `campaign@${domain.domainName}`;
+                    const senderLocal = domain.defaultSenderLocalPart || 'campaign';
+                    const fromAddr = `${senderLocal}@${domain.domainName}`;
+                    const envFromAddr = domain.customReturnPathDomain
+                      ? `bounces+${domain.id}@${domain.customReturnPathDomain}`
+                      : fromAddr;
                     const subject = render(tplVer.subject);
                     const mime = buildBasicRfc5322Mime({
                       from: fromAddr,
@@ -146,6 +165,7 @@ export function createApp(deps: AppDependencies): Express {
                       organizationId: orgId,
                       domainId: domain.id,
                       from: fromAddr,
+                      envelopeFrom: envFromAddr,
                       recipients: [contact.email],
                       subject,
                       bodyStorageKey: spooled.storageKey,

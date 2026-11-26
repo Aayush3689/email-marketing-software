@@ -1,4 +1,15 @@
-import type { EmailEventType, SuppressionReason } from '@mail/shared-types';
+import type {
+  DnsCheckState,
+  DnsRecordEvaluation,
+  DkimKeySummary,
+  DomainDeliverabilityMetrics,
+  DomainDnsCheckHistoryItem,
+  DomainHealthStatus,
+  DomainHostingSummary,
+  DomainNotification,
+  EmailEventType,
+  SuppressionReason,
+} from '@mail/shared-types';
 
 const TOKEN_KEY = 'mailforge_access_token';
 const REFRESH_KEY = 'mailforge_refresh_token';
@@ -25,7 +36,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly code: string,
-    message: string
+    message: string,
+    public readonly extra?: Record<string, unknown>
   ) {
     super(message);
   }
@@ -91,11 +103,12 @@ async function apiFetch<T>(path: string, init: RequestInit = {}, retried = false
   const contentType = res.headers.get('content-type') ?? '';
   if (!res.ok) {
     if (contentType.includes('application/json')) {
-      const payload = (await res.json()) as { error?: { code?: string; message?: string } };
+      const payload = (await res.json()) as { error?: { code?: string; message?: string; [k: string]: unknown } };
       throw new ApiError(
         res.status,
         payload.error?.code ?? 'API_ERROR',
-        payload.error?.message ?? `Request failed (${res.status})`
+        payload.error?.message ?? `Request failed (${res.status})`,
+        payload.error
       );
     }
     throw new ApiError(res.status, 'HTTP_ERROR', `Request failed (${res.status})`);
@@ -121,9 +134,97 @@ export interface DomainItem {
   sendingEnabled: boolean;
   hostingEnabled: boolean;
   isSuspended: boolean;
+  suspensionReason?: string | null;
   activeDkimSelector: string | null;
+  customReturnPathDomain?: string | null;
+  customTrackingDomain?: string | null;
+  defaultSenderLocalPart?: string | null;
   dmarcPolicy: 'none' | 'quarantine' | 'reject';
+  dmarcRua?: string | null;
+  dmarcRuf?: string | null;
+  dmarcPct?: number;
+  dmarcAspf?: 'r' | 's';
+  dmarcAdkim?: 'r' | 's';
+  dailySendLimit?: number | null;
+  mtaStsMode?: 'none' | 'testing' | 'enforce';
+  mtaStsMaxAge?: number;
+  tlsRptRua?: string | null;
+  bimiSelector?: string;
+  bimiLogoUrl?: string | null;
+  bimiVmcUrl?: string | null;
+  lastDnsCheckedAt?: string | null;
+  lastAuthPassedAt?: string | null;
   createdAt: string;
+  healthStatus?: DomainHealthStatus;
+  spfStatus?: DnsCheckState;
+  dkimStatus?: DnsCheckState;
+  dmarcStatus?: DnsCheckState;
+  mxStatus?: DnsCheckState;
+  ptrStatus?: DnsCheckState;
+  mailboxCount?: number;
+  warningsCount?: number;
+}
+
+export interface DomainListSummary {
+  total: number;
+  verified: number;
+  dnsIssues: number;
+  sendingEnabled: number;
+  hostingEnabled: number;
+}
+
+export interface DomainAuditEventItem {
+  id: string;
+  actorUserId: string;
+  actorIp: string | null;
+  action: string;
+  beforeState: unknown;
+  afterState: unknown;
+  createdAt: string;
+}
+
+export interface DomainDetailResponse {
+  domain: DomainItem;
+  dnsRecords: Array<{ type: string; host?: string; name?: string; value: string; purpose?: string; ttl?: number }>;
+  diagnostics: {
+    checkedAt: string | null;
+    records: DnsRecordEvaluation[];
+  };
+  dkimKeys: DkimKeySummary[];
+  deliverability: DomainDeliverabilityMetrics | null;
+  hosting: DomainHostingSummary | null;
+  history: DomainDnsCheckHistoryItem[];
+  auditEvents: DomainAuditEventItem[];
+  notifications: DomainNotification[];
+  infra: {
+    heloDomain: string;
+    publicIp: string | null;
+    spfIncludeDomain: string | null;
+    trackingCnameTarget: string | null;
+    mtaNodeId: string | null;
+    mtaLoadedSelectors: string[];
+  };
+}
+
+export interface DomainUpdatePatch {
+  sendingEnabled?: boolean;
+  hostingEnabled?: boolean;
+  defaultSenderLocalPart?: string | null;
+  customReturnPathDomain?: string | null;
+  customTrackingDomain?: string | null;
+  dailySendLimit?: number | null;
+  dmarcPolicy?: 'none' | 'quarantine' | 'reject';
+  dmarcRua?: string | null;
+  dmarcRuf?: string | null;
+  dmarcPct?: number;
+  dmarcAspf?: 'r' | 's';
+  dmarcAdkim?: 'r' | 's';
+  mtaStsMode?: 'none' | 'testing' | 'enforce';
+  mtaStsMaxAge?: number;
+  tlsRptRua?: string | null;
+  bimiSelector?: string;
+  bimiLogoUrl?: string | null;
+  bimiVmcUrl?: string | null;
 }
 
 export interface ApiKeyItem {
@@ -296,19 +397,56 @@ export const api = {
       body: JSON.stringify({ refreshToken: getStoredRefreshToken() }),
     }),
 
-  listDomains: () => apiFetch<{ domains: DomainItem[] }>('/v1/domains'),
-  getDomain: (id: string) =>
-    apiFetch<{ domain: DomainItem; dnsRecords: Array<{ type: string; name: string; value: string; ttl: number }> }>(
-      `/v1/domains/${id}`
-    ),
+  listDomains: (params?: {
+    search?: string | undefined;
+    health?: string | undefined;
+    verified?: string | undefined;
+    role?: string | undefined;
+    sort?: string | undefined;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.search) qs.set('search', params.search);
+    if (params?.health) qs.set('health', params.health);
+    if (params?.verified) qs.set('verified', params.verified);
+    if (params?.role) qs.set('role', params.role);
+    if (params?.sort) qs.set('sort', params.sort);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<{ domains: DomainItem[]; summary?: DomainListSummary }>(`/v1/domains${suffix}`);
+  },
+  getDomain: (id: string) => apiFetch<DomainDetailResponse>(`/v1/domains/${id}`),
   createDomain: (body: { domainName: string; sendingEnabled: boolean; hostingEnabled: boolean }) =>
     apiFetch<{ domain: DomainItem }>('/v1/domains', { method: 'POST', body: JSON.stringify(body) }),
   verifyDomain: (id: string) =>
-    apiFetch<{ domain: DomainItem }>(`/v1/domains/${id}/verify`, { method: 'POST' }),
-  updateDomain: (
+    apiFetch<{ domain: DomainItem; verified: boolean; ownershipMatched?: boolean; message?: string }>(
+      `/v1/domains/${id}/verify`,
+      { method: 'POST' }
+    ),
+  runDomainDiagnostics: (id: string, asyncMode = false) =>
+    apiFetch<{
+      domain?: DomainItem;
+      check?: DomainDnsCheckHistoryItem;
+      job?: { id: string; status: 'queued' | 'running' | 'completed' | 'failed'; resultCheckId: string | null; errorMessage: string | null };
+    }>(`/v1/domains/${id}/diagnostics${asyncMode ? '?async=true' : ''}`, { method: 'POST' }),
+  getDomainDiagnosticJob: (id: string, jobId: string) =>
+    apiFetch<{ job: { id: string; status: 'queued' | 'running' | 'completed' | 'failed'; resultCheckId: string | null; errorMessage: string | null } }>(
+      `/v1/domains/${id}/diagnostics/${jobId}`
+    ),
+  regenerateDomainToken: (id: string) =>
+    apiFetch<{ domain: DomainItem }>(`/v1/domains/${id}/regenerate-token`, { method: 'POST' }),
+  rotateDomainDkim: (
     id: string,
-    patch: { sendingEnabled?: boolean; hostingEnabled?: boolean; dmarcPolicy?: 'none' | 'quarantine' | 'reject' }
-  ) => apiFetch<{ domain: DomainItem }>(`/v1/domains/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+    body?: { selector?: string | undefined; algorithm?: 'rsa2048' | 'ed25519' | undefined }
+  ) =>
+    apiFetch<{ key: DkimKeySummary; dkimKeys: DkimKeySummary[]; mtaSynced: boolean }>(
+      `/v1/domains/${id}/dkim/rotate`,
+      { method: 'POST', body: JSON.stringify(body ?? {}) }
+    ),
+  revokeDomainDkim: (id: string, keyId: string) =>
+    apiFetch<{ revoked: boolean }>(`/v1/domains/${id}/dkim/${keyId}/revoke`, { method: 'POST' }),
+  updateDomain: (id: string, patch: DomainUpdatePatch) =>
+    apiFetch<{ domain: DomainItem }>(`/v1/domains/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteDomain: (id: string, body: { confirmDomainName: string; confirmCleanup: boolean }) =>
+    apiFetch<void>(`/v1/domains/${id}`, { method: 'DELETE', body: JSON.stringify(body) }),
 
   listApiKeys: () => apiFetch<{ apiKeys: ApiKeyItem[] }>('/v1/api-keys'),
   createApiKey: (body: { name: string; scopes: string[]; rateLimitRpm: number }) =>

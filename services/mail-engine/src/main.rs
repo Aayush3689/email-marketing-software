@@ -40,8 +40,8 @@ use smtp_server::{
 use smtp_session::SessionTimeouts;
 use sqlx::postgres::PgPoolOptions;
 use state_store::{
-    load_or_seed_dkim_keys, EngineDeliveryStateStore, PgCredentialStore, PgDomainDirectory,
-    PgFeedbackStore,
+    load_or_seed_dkim_keys, reload_dkim_keys_from_db, EngineDeliveryStateStore, PgCredentialStore,
+    PgDomainDirectory, PgFeedbackStore,
 };
 use storage_and_dkim::DkimSigningStore;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -182,24 +182,9 @@ async fn main() -> Result<()> {
     metrics.record_node_boot(&config.node_id);
 
     let raw_storage = Arc::new(build_spool_storage(&config).await?);
-    let kek = Arc::new(KeyEncryptionKey::from_hex(&config.dkim_kek_hex)?);
     let (pg_pool, rmq_client) = connect_infra(&config).await?;
-
-    let keyring = Arc::new(DkimKeyRing::default());
-    load_or_seed_dkim_keys(
-        pg_pool.as_ref(),
-        &keyring,
-        &kek,
-        config.primary_domain.as_deref(),
-        &config.dkim_selector,
-        config.dkim_auto_generate,
-    )
-    .await;
-    let signing_storage = Arc::new(DkimSigningStore::new(
-        Arc::clone(&raw_storage),
-        Arc::clone(&keyring),
-        Arc::clone(&kek),
-    ));
+    let (keyring, signing_storage) =
+        initialize_dkim(&config, &raw_storage, pg_pool.as_ref()).await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let draining = Arc::new(AtomicBool::new(false));
@@ -212,6 +197,8 @@ async fn main() -> Result<()> {
         config.clone(),
         Arc::clone(&metrics),
         Arc::clone(&draining),
+        Arc::clone(&keyring),
+        pg_pool.clone(),
         shutdown_rx.clone(),
     )));
 
@@ -616,6 +603,8 @@ async fn serve_control_and_metrics(
     config: EngineConfig,
     metrics: Arc<MetricsRegistry>,
     draining: Arc<AtomicBool>,
+    keyring: Arc<DkimKeyRing>,
+    pg_pool: Option<sqlx::PgPool>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     info!(addr = %listener.local_addr()?, "Prometheus /metrics & /control listener started");
@@ -626,8 +615,14 @@ async fn serve_control_and_metrics(
                     let cfg = config.clone();
                     let m = Arc::clone(&metrics);
                     let d = Arc::clone(&draining);
+                    let kr = Arc::clone(&keyring);
+                    let pool = pg_pool.clone();
                     tokio::spawn(async move {
-                        let _ = timeout(Duration::from_secs(5), handle_control_connection(stream, &cfg, &m, &d)).await;
+                        let _ = timeout(
+                            Duration::from_secs(5),
+                            handle_control_connection(stream, &cfg, &m, &d, &kr, pool.as_ref()),
+                        )
+                        .await;
                     });
                 }
             }
@@ -646,6 +641,8 @@ async fn handle_control_connection(
     config: &EngineConfig,
     metrics: &MetricsRegistry,
     draining: &AtomicBool,
+    keyring: &DkimKeyRing,
+    pg_pool: Option<&sqlx::PgPool>,
 ) {
     let mut buf = [0_u8; 4096];
     let Ok(n) = stream.read(&mut buf).await else {
@@ -687,6 +684,10 @@ async fn handle_control_connection(
                 "{\"error\":\"unauthorized\"}".to_string(),
             )
         }
+    } else if let Some(resp) =
+        handle_dkim_control_request(first_line, authorized, config, keyring, pg_pool).await
+    {
+        resp
     } else if first_line.starts_with("GET /status") || first_line.starts_with("GET /healthz") {
         let is_draining = draining.load(Ordering::Relaxed);
         let active = metrics.smtp_active_connections.get();
@@ -744,4 +745,94 @@ fn is_bearer_authorized(req: &str, expected_token: Option<&str>) -> bool {
         }
     }
     false
+}
+
+async fn initialize_dkim<S>(
+    config: &EngineConfig,
+    raw_storage: &Arc<S>,
+    pg_pool: Option<&sqlx::PgPool>,
+) -> Result<(Arc<DkimKeyRing>, Arc<DkimSigningStore<S>>)> {
+    let kek = Arc::new(KeyEncryptionKey::from_hex(&config.dkim_kek_hex)?);
+    let keyring = Arc::new(DkimKeyRing::default());
+    load_or_seed_dkim_keys(
+        pg_pool,
+        &keyring,
+        &kek,
+        config.primary_domain.as_deref(),
+        &config.dkim_selector,
+        config.dkim_auto_generate,
+    )
+    .await;
+    let signing_storage = Arc::new(DkimSigningStore::new(
+        Arc::clone(raw_storage),
+        Arc::clone(&keyring),
+        Arc::clone(&kek),
+        pg_pool.cloned(),
+    ));
+    Ok((keyring, signing_storage))
+}
+
+async fn handle_dkim_control_request(
+    first_line: &str,
+    authorized: bool,
+    config: &EngineConfig,
+    keyring: &DkimKeyRing,
+    pg_pool: Option<&sqlx::PgPool>,
+) -> Option<(&'static str, &'static str, String)> {
+    if first_line.starts_with("POST /control/dkim/reload") {
+        if !authorized {
+            return Some((
+                "401 Unauthorized",
+                "application/json",
+                "{\"error\":\"unauthorized\"}".to_string(),
+            ));
+        }
+        if let Some(pool) = pg_pool {
+            return Some(match reload_dkim_keys_from_db(pool, keyring).await {
+                Ok(count) => {
+                    let selectors = keyring.active_selectors_by_domain();
+                    let json = serde_json::json!({
+                        "reloaded": count,
+                        "activeSelectors": selectors,
+                    })
+                    .to_string();
+                    info!(reloaded = count, "Reloaded DKIM keys from PostgreSQL");
+                    ("200 OK", "application/json", json)
+                }
+                Err(err) => (
+                    "500 Internal Server Error",
+                    "application/json",
+                    serde_json::json!({ "error": err.to_string() }).to_string(),
+                ),
+            });
+        }
+        return Some((
+            "200 OK",
+            "application/json",
+            serde_json::json!({
+                "reloaded": 0,
+                "activeSelectors": keyring.active_selectors_by_domain(),
+            })
+            .to_string(),
+        ));
+    }
+
+    if first_line.starts_with("GET /control/dkim/status") {
+        if authorized {
+            let json = serde_json::json!({
+                "nodeId": config.node_id,
+                "heloDomain": config.helo_domain,
+                "activeSelectors": keyring.active_selectors_by_domain(),
+            })
+            .to_string();
+            return Some(("200 OK", "application/json", json));
+        }
+        return Some((
+            "401 Unauthorized",
+            "application/json",
+            "{\"error\":\"unauthorized\"}".to_string(),
+        ));
+    }
+
+    None
 }

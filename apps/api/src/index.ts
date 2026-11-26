@@ -10,7 +10,15 @@ import { InMemoryAnalyticsStore } from './routes/analytics.js';
 import { InMemoryAuthStore } from './routes/auth.js';
 import { InMemoryMarketingStore } from './routes/campaigns.js';
 import { InMemoryCredentialsStore } from './routes/credentials.js';
-import { InMemoryDomainStore } from './routes/domains.js';
+import {
+  createHttpMtaSyncClient,
+  InMemoryDomainStore,
+} from './routes/domains.js';
+import {
+  createNodeDnsAdapter,
+  getInfraDnsConfig,
+  runFullDomainDiagnostics,
+} from './services/dns-verifier.js';
 import { LocalSpoolWriter, PgEmailSubmissionStore, S3SpoolWriter } from './routes/emails.js';
 import { InMemoryMailboxStore } from './routes/mailboxes.js';
 import type { ReadinessDeps } from './routes/health.js';
@@ -84,6 +92,11 @@ if (config.MAIL_ENGINE_CONTROL_URL) {
   );
 }
 
+const mtaDomainSync = createHttpMtaSyncClient(
+  config.MAIL_ENGINE_CONTROL_URL,
+  config.MAIL_ENGINE_CONTROL_TOKEN
+);
+
 const app = createApp({
   corsOrigins: config.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean),
   adminCorsOrigins: config.ADMIN_CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean),
@@ -91,6 +104,7 @@ const app = createApp({
   jwtSecret: config.JWT_ACCESS_SECRET,
   authStore,
   domainStore,
+  mtaDomainSync,
   mailboxStore,
   credentialsStore,
   marketingStore,
@@ -198,7 +212,47 @@ void bootstrapFromEnv().catch((err) => {
   });
 });
 
+// Background periodic DNS re-verification for pending domains and stale diagnostics
+const dnsAutoTimer = setInterval(() => {
+  if (useInMemory || !domainStore.listAllDomains) return;
+  void (async () => {
+    try {
+      const all = await domainStore.listAllDomains!();
+      const now = Date.now();
+      const pendingOrStale = all.filter((d) => {
+        if (d.isSuspended) return false;
+        const lastMs = d.lastDnsCheckedAt ? Date.parse(d.lastDnsCheckedAt) : 0;
+        if (!d.ownershipVerifiedAt) return now - lastMs > 120_000;
+        return now - lastMs > 6 * 60 * 60 * 1000;
+      });
+      if (pendingOrStale.length === 0) return;
+
+      const adapter = createNodeDnsAdapter(config.DNS_CHECK_TIMEOUT_MS);
+      const mtaStatus = await mtaDomainSync.getDkimStatus().catch(() => null);
+      for (const dom of pendingOrStale.slice(0, 5)) {
+        const keys = domainStore.listDkimKeys ? await domainStore.listDkimKeys(dom.id) : [];
+        const mtaLoaded = mtaStatus?.activeSelectors?.[dom.domainName.toLowerCase()];
+        const report = await runFullDomainDiagnostics(
+          { ...dom, dkimKeys: keys, mtaLoadedSelectors: mtaLoaded },
+          adapter,
+          getInfraDnsConfig()
+        );
+        if (report.ownershipMatched && !dom.ownershipVerifiedAt) {
+          await domainStore.markVerified(dom.organizationId, dom.id);
+        }
+        await domainStore.recordDnsCheckResult?.(dom.id, report);
+      }
+    } catch (err) {
+      logger.warn('Background DNS verification sweep skipped', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  })();
+}, 120_000);
+dnsAutoTimer.unref();
+
 async function shutdown(signal: string): Promise<void> {
+  clearInterval(dnsAutoTimer);
   logger.info('Shutting down API server', { signal });
   server.close(async () => {
     await pgPool.end();

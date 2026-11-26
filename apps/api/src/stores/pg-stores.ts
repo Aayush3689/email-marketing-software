@@ -1,5 +1,13 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import type { EmailEventType, SuppressionReason } from '@mail/shared-types';
+import type {
+  DnsCheckState,
+  DnsRecordEvaluation,
+  DomainDeliverabilityMetrics,
+  DomainDnsCheckHistoryItem,
+  DomainHostingSummary,
+  EmailEventType,
+  SuppressionReason,
+} from '@mail/shared-types';
 import type { Pool } from 'pg';
 import { hashPasswordArgon2id, hashTokenSha256 } from '../auth/security.js';
 import { AppError } from '../middleware/error-handler.js';
@@ -26,7 +34,14 @@ import type {
   CredentialsStore,
   SmtpCredentialRecord,
 } from '../routes/credentials.js';
-import type { DomainRecord, DomainStore } from '../routes/domains.js';
+import type {
+  DomainAuditEvent,
+  DomainDnsJobRecord,
+  DomainRecord,
+  DomainStore,
+  DomainUpdatePatch,
+  StoredDkimKeyRecord,
+} from '../routes/domains.js';
 import type {
   AliasRecord,
   ForwardingRuleRecord,
@@ -38,6 +53,8 @@ import type {
   WebhookEndpointRecord,
   WebhookStore,
 } from '../routes/webhooks.js';
+import { generateDomainDkimKeyPair } from '../services/dkim-service.js';
+import { diffDnsSnapshots, type FullDomainDnsDiagnostics } from '../services/dns-verifier.js';
 import { uuidv7 } from '../utils/uuidv7.js';
 
 function iso(value: Date | string): string {
@@ -350,40 +367,56 @@ export class PgAuthStore implements AuthStore {
 export class PgDomainStore implements DomainStore {
   constructor(private readonly pool: Pool) {}
 
-  private mapDomain(r: {
-    id: string;
-    organization_id: string;
-    domain_name: string;
-    verification_token: string;
-    ownership_verified_at: Date | string | null;
-    sending_enabled: boolean;
-    hosting_enabled: boolean;
-    is_suspended: boolean;
-    suspension_reason: string | null;
-    active_selector: string | null;
-    created_at: Date | string;
-  }): DomainRecord {
+  private static readonly DOMAIN_COLS = `
+    d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
+    d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason,
+    COALESCE((SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' ORDER BY k.created_at DESC LIMIT 1), d.active_dkim_selector, 'mp1') AS active_selector,
+    d.custom_return_path_domain::text, d.custom_tracking_domain::text, d.default_sender_local_part,
+    d.dmarc_policy, d.dmarc_rua, d.dmarc_ruf, d.dmarc_pct, d.dmarc_aspf, d.dmarc_adkim,
+    d.daily_send_limit, d.mta_sts_mode, d.mta_sts_max_age, d.tls_rpt_rua,
+    d.bimi_selector, d.bimi_logo_url, d.bimi_vmc_url,
+    d.last_dns_checked_at, d.last_auth_passed_at, d.created_at
+  `;
+
+  private mapDomain(r: Record<string, unknown>): DomainRecord {
+    const policy = String(r.dmarc_policy ?? 'none');
+    const mtaSts = String(r.mta_sts_mode ?? 'none');
     return {
-      id: r.id,
-      organizationId: r.organization_id,
-      domainName: r.domain_name.toLowerCase(),
-      verificationToken: r.verification_token,
-      ownershipVerifiedAt: isoOrNull(r.ownership_verified_at),
-      sendingEnabled: r.sending_enabled,
-      hostingEnabled: r.hosting_enabled,
-      isSuspended: r.is_suspended,
-      suspensionReason: r.suspension_reason,
-      activeDkimSelector: r.active_selector ?? 'mp1',
-      dmarcPolicy: 'quarantine',
-      createdAt: iso(r.created_at),
+      id: String(r.id),
+      organizationId: String(r.organization_id),
+      domainName: String(r.domain_name).toLowerCase(),
+      verificationToken: String(r.verification_token),
+      ownershipVerifiedAt: isoOrNull(r.ownership_verified_at as Date | string | null),
+      sendingEnabled: Boolean(r.sending_enabled),
+      hostingEnabled: Boolean(r.hosting_enabled),
+      isSuspended: Boolean(r.is_suspended),
+      suspensionReason: (r.suspension_reason as string | null) ?? null,
+      activeDkimSelector: (r.active_selector as string | null) ?? 'mp1',
+      customReturnPathDomain: (r.custom_return_path_domain as string | null)?.toLowerCase() ?? null,
+      customTrackingDomain: (r.custom_tracking_domain as string | null)?.toLowerCase() ?? null,
+      defaultSenderLocalPart: (r.default_sender_local_part as string | null) ?? null,
+      dmarcPolicy: policy === 'quarantine' || policy === 'reject' ? policy : 'none',
+      dmarcRua: (r.dmarc_rua as string | null) ?? null,
+      dmarcRuf: (r.dmarc_ruf as string | null) ?? null,
+      dmarcPct: typeof r.dmarc_pct === 'number' ? r.dmarc_pct : 100,
+      dmarcAspf: r.dmarc_aspf === 's' ? 's' : 'r',
+      dmarcAdkim: r.dmarc_adkim === 's' ? 's' : 'r',
+      dailySendLimit: r.daily_send_limit !== null && r.daily_send_limit !== undefined ? Number(r.daily_send_limit) : null,
+      mtaStsMode: mtaSts === 'testing' || mtaSts === 'enforce' ? mtaSts : 'none',
+      mtaStsMaxAge: typeof r.mta_sts_max_age === 'number' ? r.mta_sts_max_age : 86400,
+      tlsRptRua: (r.tls_rpt_rua as string | null) ?? null,
+      bimiSelector: String(r.bimi_selector ?? 'default'),
+      bimiLogoUrl: (r.bimi_logo_url as string | null) ?? null,
+      bimiVmcUrl: (r.bimi_vmc_url as string | null) ?? null,
+      lastDnsCheckedAt: isoOrNull(r.last_dns_checked_at as Date | string | null),
+      lastAuthPassedAt: isoOrNull(r.last_auth_passed_at as Date | string | null),
+      createdAt: iso(r.created_at as Date | string),
     };
   }
 
   async listDomains(organizationId: string): Promise<DomainRecord[]> {
     const res = await this.pool.query(
-      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
-              d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason, d.created_at,
-              (SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' LIMIT 1) AS active_selector
+      `SELECT ${PgDomainStore.DOMAIN_COLS}
          FROM domains d
         WHERE d.organization_id = $1
         ORDER BY d.created_at DESC`,
@@ -394,9 +427,7 @@ export class PgDomainStore implements DomainStore {
 
   async listAllDomains(): Promise<DomainRecord[]> {
     const res = await this.pool.query(
-      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
-              d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason, d.created_at,
-              (SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' LIMIT 1) AS active_selector
+      `SELECT ${PgDomainStore.DOMAIN_COLS}
          FROM domains d
         ORDER BY d.created_at DESC`
     );
@@ -409,12 +440,12 @@ export class PgDomainStore implements DomainStore {
     suspensionReason: string | null
   ): Promise<DomainRecord | null> {
     const res = await this.pool.query(
-      `UPDATE domains SET is_suspended = $2, suspension_reason = $3 WHERE id = $1
-       RETURNING id::text, organization_id::text, domain_name::text, verification_token, ownership_verified_at,
-                 sending_enabled, hosting_enabled, is_suspended, suspension_reason, created_at, 'mp1'::text AS active_selector`,
+      `UPDATE domains SET is_suspended = $2, suspension_reason = $3, updated_at = NOW() WHERE id = $1 RETURNING organization_id::text`,
       [domainId, isSuspended, isSuspended ? suspensionReason : null]
     );
-    return res.rows[0] ? this.mapDomain(res.rows[0]) : null;
+    const orgId = res.rows[0]?.organization_id as string | undefined;
+    if (!orgId) return null;
+    return this.getDomain(orgId, domainId);
   }
 
   async createDomain(input: {
@@ -426,15 +457,17 @@ export class PgDomainStore implements DomainStore {
     const normalized = input.domainName.trim().toLowerCase();
     const token = `mp-verify-${randomBytes(12).toString('hex')}`;
     const id = uuidv7();
+    const defaultSel = (process.env.DKIM_SELECTOR || 'mp1').trim().toLowerCase();
     try {
-      const res = await this.pool.query(
-        `INSERT INTO domains (id, organization_id, domain_name, verification_token, sending_enabled, hosting_enabled)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id::text, organization_id::text, domain_name::text, verification_token, ownership_verified_at,
-                   sending_enabled, hosting_enabled, is_suspended, suspension_reason, created_at, 'mp1'::text AS active_selector`,
-        [id, input.organizationId, normalized, token, input.sendingEnabled, input.hostingEnabled]
+      await this.pool.query(
+        `INSERT INTO domains (id, organization_id, domain_name, verification_token, sending_enabled, hosting_enabled, active_dkim_selector, dmarc_rua)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [id, input.organizationId, normalized, token, input.sendingEnabled, input.hostingEnabled, defaultSel, `mailto:dmarc@${normalized}`]
       );
-      return this.mapDomain(res.rows[0]);
+      await this.ensureInitialDkimKey(id, normalized, defaultSel);
+      const created = await this.getDomain(input.organizationId, id);
+      if (!created) throw new Error('Failed reading newly created domain');
+      return created;
     } catch (err) {
       if ((err as { code?: string }).code === '23505') {
         throw new AppError(409, 'DOMAIN_EXISTS', `Domain ${normalized} is already registered`);
@@ -445,9 +478,7 @@ export class PgDomainStore implements DomainStore {
 
   async getDomain(organizationId: string, domainId: string): Promise<DomainRecord | null> {
     const res = await this.pool.query(
-      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
-              d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason, d.created_at,
-              (SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' LIMIT 1) AS active_selector
+      `SELECT ${PgDomainStore.DOMAIN_COLS}
          FROM domains d
         WHERE d.organization_id = $1 AND d.id = $2
         LIMIT 1`,
@@ -467,23 +498,530 @@ export class PgDomainStore implements DomainStore {
     return this.getDomain(organizationId, domainId);
   }
 
+  async regenerateVerificationToken(orgId: string, domainId: string): Promise<DomainRecord | null> {
+    const token = `mp-verify-${randomBytes(12).toString('hex')}`;
+    await this.pool.query(
+      `UPDATE domains
+          SET verification_token = $3,
+              ownership_verified_at = NULL,
+              updated_at = NOW()
+        WHERE organization_id = $1 AND id = $2`,
+      [orgId, domainId, token]
+    );
+    return this.getDomain(orgId, domainId);
+  }
+
   async updateSettings(
     organizationId: string,
     domainId: string,
-    patch: { sendingEnabled?: boolean; hostingEnabled?: boolean; dmarcPolicy?: 'none' | 'quarantine' | 'reject' }
+    patch: DomainUpdatePatch
   ): Promise<DomainRecord | null> {
+    const sets: string[] = ['updated_at = NOW()'];
+    const vals: unknown[] = [organizationId, domainId];
+    const addField = (col: string, val: unknown) => {
+      vals.push(val);
+      sets.push(`${col} = $${vals.length}`);
+    };
+    if (patch.sendingEnabled !== undefined) addField('sending_enabled', patch.sendingEnabled);
+    if (patch.hostingEnabled !== undefined) addField('hosting_enabled', patch.hostingEnabled);
+    if (patch.defaultSenderLocalPart !== undefined) addField('default_sender_local_part', patch.defaultSenderLocalPart || null);
+    if (patch.customReturnPathDomain !== undefined) addField('custom_return_path_domain', patch.customReturnPathDomain);
+    if (patch.customTrackingDomain !== undefined) addField('custom_tracking_domain', patch.customTrackingDomain);
+    if (patch.dailySendLimit !== undefined) addField('daily_send_limit', patch.dailySendLimit);
+    if (patch.dmarcPolicy !== undefined) addField('dmarc_policy', patch.dmarcPolicy);
+    if (patch.dmarcRua !== undefined) addField('dmarc_rua', patch.dmarcRua);
+    if (patch.dmarcRuf !== undefined) addField('dmarc_ruf', patch.dmarcRuf);
+    if (patch.dmarcPct !== undefined) addField('dmarc_pct', patch.dmarcPct);
+    if (patch.dmarcAspf !== undefined) addField('dmarc_aspf', patch.dmarcAspf);
+    if (patch.dmarcAdkim !== undefined) addField('dmarc_adkim', patch.dmarcAdkim);
+    if (patch.mtaStsMode !== undefined) addField('mta_sts_mode', patch.mtaStsMode);
+    if (patch.mtaStsMaxAge !== undefined) addField('mta_sts_max_age', patch.mtaStsMaxAge);
+    if (patch.tlsRptRua !== undefined) addField('tls_rpt_rua', patch.tlsRptRua);
+    if (patch.bimiSelector !== undefined) addField('bimi_selector', patch.bimiSelector);
+    if (patch.bimiLogoUrl !== undefined) addField('bimi_logo_url', patch.bimiLogoUrl);
+    if (patch.bimiVmcUrl !== undefined) addField('bimi_vmc_url', patch.bimiVmcUrl);
+
+    await this.pool.query(
+      `UPDATE domains SET ${sets.join(', ')} WHERE organization_id = $1 AND id = $2`,
+      vals
+    );
+    return this.getDomain(organizationId, domainId);
+  }
+
+  async listDkimKeys(domainId: string): Promise<StoredDkimKeyRecord[]> {
+    const res = await this.pool.query(
+      `SELECT k.id::text, k.domain_id::text, d.domain_name::text, k.selector, k.algorithm,
+              k.public_key_dns_txt, k.status, k.rotated_at, k.created_at
+         FROM dkim_keys k
+         JOIN domains d ON d.id = k.domain_id
+        WHERE k.domain_id = $1
+        ORDER BY CASE k.status WHEN 'active' THEN 0 WHEN 'retiring' THEN 1 ELSE 2 END, k.created_at DESC`,
+      [domainId]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      domainId: String(r.domain_id),
+      selector: String(r.selector),
+      algorithm: r.algorithm === 'ed25519' ? 'ed25519' : 'rsa2048',
+      dnsRecordName: `${String(r.selector)}._domainkey.${String(r.domain_name).toLowerCase()}`,
+      publicKeyDnsTxt: String(r.public_key_dns_txt),
+      status: r.status === 'retiring' || r.status === 'revoked' ? r.status : 'active',
+      rotatedAt: isoOrNull(r.rotated_at as Date | string | null),
+      createdAt: iso(r.created_at as Date | string),
+    }));
+  }
+
+  async ensureInitialDkimKey(
+    domainId: string,
+    domainName: string,
+    selector: string
+  ): Promise<StoredDkimKeyRecord> {
+    const existing = await this.listDkimKeys(domainId);
+    const active = existing.find((k) => k.status === 'active');
+    if (active) return active;
+
+    const cleanSel = selector.trim().toLowerCase() || 'mp1';
+    const generated = generateDomainDkimKeyPair(domainName, cleanSel, 'rsa2048');
+    const id = uuidv7();
+    await this.pool.query(
+      `INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'active')
+       ON CONFLICT (domain_id, selector) DO NOTHING`,
+      [id, domainId, generated.selector, generated.algorithm, generated.publicKeyDnsTxt, generated.encryptedPrivateKey]
+    );
+    const refreshed = await this.listDkimKeys(domainId);
+    const activeAfter = refreshed.find((k) => k.status === 'active') ?? refreshed[0];
+    if (!activeAfter) throw new Error('Failed persisting DKIM key');
+    return activeAfter;
+  }
+
+  async rotateDkimKey(
+    orgId: string,
+    domainId: string,
+    selector: string,
+    algorithm: 'rsa2048' | 'ed25519'
+  ): Promise<StoredDkimKeyRecord | null> {
+    const dom = await this.getDomain(orgId, domainId);
+    if (!dom) return null;
+    const normSel = selector.trim().toLowerCase();
+    const generated = generateDomainDkimKeyPair(dom.domainName, normSel, algorithm);
+    const keyId = uuidv7();
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const dup = await client.query(
+        `SELECT 1 FROM dkim_keys WHERE domain_id = $1 AND selector = $2 LIMIT 1`,
+        [domainId, normSel]
+      );
+      if ((dup.rowCount ?? 0) > 0) {
+        throw new AppError(409, 'SELECTOR_EXISTS', `Selector "${normSel}" already exists on ${dom.domainName}`);
+      }
+      await client.query(
+        `UPDATE dkim_keys SET status = 'retiring', rotated_at = NOW() WHERE domain_id = $1 AND status = 'active'`,
+        [domainId]
+      );
+      await client.query(
+        `INSERT INTO dkim_keys (id, domain_id, selector, algorithm, public_key_dns_txt, encrypted_private_key, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'active')`,
+        [keyId, domainId, generated.selector, generated.algorithm, generated.publicKeyDnsTxt, generated.encryptedPrivateKey]
+      );
+      await client.query(
+        `UPDATE domains SET active_dkim_selector = $2, updated_at = NOW() WHERE id = $1`,
+        [domainId, generated.selector]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    const keys = await this.listDkimKeys(domainId);
+    return keys.find((k) => k.id === keyId) ?? null;
+  }
+
+  async revokeDkimKey(orgId: string, domainId: string, keyId: string): Promise<boolean> {
+    const dom = await this.getDomain(orgId, domainId);
+    if (!dom) return false;
+    const rowRes = await this.pool.query(
+      `SELECT status FROM dkim_keys WHERE domain_id = $1 AND id = $2 LIMIT 1`,
+      [domainId, keyId]
+    );
+    const row = rowRes.rows[0];
+    if (!row) return false;
+    if (row.status === 'active') {
+      throw new AppError(400, 'CANNOT_REVOKE_ACTIVE', 'Rotate to a new active DKIM selector before revoking this key');
+    }
+    const res = await this.pool.query(
+      `UPDATE dkim_keys SET status = 'revoked' WHERE domain_id = $1 AND id = $2`,
+      [domainId, keyId]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  async recordDnsCheckResult(
+    domainId: string,
+    report: FullDomainDnsDiagnostics
+  ): Promise<DomainDnsCheckHistoryItem> {
+    const prev = await this.listDnsCheckHistory(domainId, 1);
+    const changes = diffDnsSnapshots(prev[0]?.records, report.records);
+    const id = uuidv7();
+    const detailsPayload = {
+      healthStatus: report.healthStatus,
+      ownershipMatched: report.ownershipMatched,
+      changes,
+      records: report.records,
+    };
+
+    await this.pool.query(
+      `INSERT INTO domain_dns_checks (id, domain_id, spf_status, dkim_status, dmarc_status, mx_status, ptr_status, details, checked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)`,
+      [
+        id,
+        domainId,
+        report.spfStatus,
+        report.dkimStatus,
+        report.dmarcStatus,
+        report.mxStatus,
+        report.ptrStatus,
+        JSON.stringify(detailsPayload),
+        report.checkedAt,
+      ]
+    );
+
     await this.pool.query(
       `UPDATE domains
-          SET sending_enabled = COALESCE($3, sending_enabled),
-              hosting_enabled = COALESCE($4, hosting_enabled)
-        WHERE organization_id = $1 AND id = $2`,
-      [organizationId, domainId, patch.sendingEnabled ?? null, patch.hostingEnabled ?? null]
+          SET last_dns_checked_at = $2,
+              last_auth_passed_at = CASE WHEN $3 = 'pass' AND $4 = 'pass' THEN $2 ELSE last_auth_passed_at END,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [domainId, report.checkedAt, report.spfStatus, report.dkimStatus]
     );
-    const updated = await this.getDomain(organizationId, domainId);
-    if (updated && patch.dmarcPolicy) {
-      updated.dmarcPolicy = patch.dmarcPolicy;
+
+    return {
+      id,
+      domainId,
+      spfStatus: report.spfStatus,
+      dkimStatus: report.dkimStatus,
+      dmarcStatus: report.dmarcStatus,
+      mxStatus: report.mxStatus,
+      ptrStatus: report.ptrStatus,
+      checkedAt: report.checkedAt,
+      changes,
+      records: report.records,
+    };
+  }
+
+  async listDnsCheckHistory(domainId: string, limit = 15): Promise<DomainDnsCheckHistoryItem[]> {
+    const res = await this.pool.query(
+      `SELECT id::text, domain_id::text, spf_status, dkim_status, dmarc_status, mx_status, ptr_status, details, checked_at
+         FROM domain_dns_checks
+        WHERE domain_id = $1
+        ORDER BY checked_at DESC
+        LIMIT $2`,
+      [domainId, limit]
+    );
+    return res.rows.map((r) => {
+      const details = (r.details ?? {}) as { changes?: string[]; records?: DnsRecordEvaluation[] };
+      return {
+        id: String(r.id),
+        domainId: String(r.domain_id),
+        spfStatus: r.spf_status as DnsCheckState,
+        dkimStatus: r.dkim_status as DnsCheckState,
+        dmarcStatus: r.dmarc_status as DnsCheckState,
+        mxStatus: r.mx_status as DnsCheckState,
+        ptrStatus: r.ptr_status as DnsCheckState,
+        checkedAt: iso(r.checked_at as Date | string),
+        changes: Array.isArray(details.changes) ? details.changes : [],
+        records: Array.isArray(details.records) ? details.records : [],
+      };
+    });
+  }
+
+  async enqueueDnsJob(
+    orgId: string,
+    domainId: string,
+    triggerSource: DomainDnsJobRecord['triggerSource'],
+    requestedBy?: string | null
+  ): Promise<DomainDnsJobRecord> {
+    const id = uuidv7();
+    const uuidRx = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const reqUser = requestedBy && uuidRx.test(requestedBy) ? requestedBy : null;
+    const res = await this.pool.query(
+      `INSERT INTO domain_dns_jobs (id, organization_id, domain_id, status, trigger_source, requested_by)
+       VALUES ($1, $2, $3, 'queued', $4, $5)
+       RETURNING created_at`,
+      [id, orgId, domainId, triggerSource, reqUser]
+    );
+    return {
+      id,
+      organizationId: orgId,
+      domainId,
+      status: 'queued',
+      triggerSource,
+      resultCheckId: null,
+      errorMessage: null,
+      createdAt: iso(res.rows[0].created_at as Date | string),
+      startedAt: null,
+      completedAt: null,
+    };
+  }
+
+  async updateDnsJob(
+    jobId: string,
+    patch: { status: DomainDnsJobRecord['status']; resultCheckId?: string; errorMessage?: string }
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE domain_dns_jobs
+          SET status = $2,
+              started_at = CASE WHEN $2 = 'running' THEN COALESCE(started_at, NOW()) ELSE started_at END,
+              completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN NOW() ELSE completed_at END,
+              result_check_id = COALESCE($3, result_check_id),
+              error_message = COALESCE($4, error_message)
+        WHERE id = $1`,
+      [jobId, patch.status, patch.resultCheckId ?? null, patch.errorMessage ?? null]
+    );
+  }
+
+  async getDnsJob(orgId: string, domainId: string, jobId: string): Promise<DomainDnsJobRecord | null> {
+    const res = await this.pool.query(
+      `SELECT id::text, organization_id::text, domain_id::text, status, trigger_source,
+              result_check_id::text, error_message, created_at, started_at, completed_at
+         FROM domain_dns_jobs
+        WHERE organization_id = $1 AND domain_id = $2 AND id = $3
+        LIMIT 1`,
+      [orgId, domainId, jobId]
+    );
+    const r = res.rows[0];
+    if (!r) return null;
+    return {
+      id: String(r.id),
+      organizationId: String(r.organization_id),
+      domainId: String(r.domain_id),
+      status: r.status as DomainDnsJobRecord['status'],
+      triggerSource: r.trigger_source as DomainDnsJobRecord['triggerSource'],
+      resultCheckId: (r.result_check_id as string | null) ?? null,
+      errorMessage: (r.error_message as string | null) ?? null,
+      createdAt: iso(r.created_at as Date | string),
+      startedAt: isoOrNull(r.started_at as Date | string | null),
+      completedAt: isoOrNull(r.completed_at as Date | string | null),
+    };
+  }
+
+  async getDeliverabilityMetrics(
+    orgId: string,
+    domainId: string,
+    domainName: string
+  ): Promise<DomainDeliverabilityMetrics> {
+    const dom = await this.getDomain(orgId, domainId);
+    const statsRes = await this.pool.query(
+      `SELECT
+          COUNT(*) FILTER (WHERE m.direction = 'outbound') AS sent_total,
+          COUNT(*) FILTER (WHERE mr.state = 'accepted_remote') AS delivered_total,
+          COUNT(*) FILTER (WHERE mr.state = 'deferred') AS deferred_total,
+          COUNT(*) FILTER (WHERE mr.state = 'bounced') AS bounced_total,
+          MAX(m.created_at) AS last_activity
+         FROM messages m
+         LEFT JOIN message_recipients mr ON mr.message_id = m.id
+        WHERE m.organization_id = $1
+          AND (m.domain_id = $2 OR LOWER(SPLIT_PART(m.envelope_from::text, '@', 2)) = LOWER($3))
+          AND m.created_at >= NOW() - INTERVAL '30 days'`,
+      [orgId, domainId, domainName]
+    );
+
+    const compRes = await this.pool.query(
+      `SELECT COUNT(*)::int AS cnt
+         FROM suppression_entries
+        WHERE organization_id = $1 AND reason = 'complaint' AND created_at >= NOW() - INTERVAL '30 days'`,
+      [orgId]
+    );
+
+    const failRes = await this.pool.query(
+      `SELECT mr.recipient_email::text, da.smtp_code, da.enhanced_code, da.smtp_response, da.attempted_at
+         FROM delivery_attempts da
+         JOIN message_recipients mr ON mr.id = da.message_recipient_id
+         JOIN messages m ON m.id = da.message_id
+        WHERE m.organization_id = $1
+          AND (m.domain_id = $2 OR LOWER(SPLIT_PART(m.envelope_from::text, '@', 2)) = LOWER($3))
+          AND da.outcome IN ('bounced', 'deferred', 'rejected', 'network_error')
+        ORDER BY da.attempted_at DESC
+        LIMIT 10`,
+      [orgId, domainId, domainName]
+    );
+
+    const s = statsRes.rows[0] ?? {};
+    const sent = Number(s.sent_total ?? 0);
+    const delivered = Number(s.delivered_total ?? 0);
+    const deferred = Number(s.deferred_total ?? 0);
+    const bounced = Number(s.bounced_total ?? 0);
+    const complained = Number(compRes.rows[0]?.cnt ?? 0);
+    const bounceRatePct = sent > 0 ? Number(((bounced / sent) * 100).toFixed(2)) : 0;
+
+    return {
+      sent30d: sent,
+      delivered30d: delivered,
+      deferred30d: deferred,
+      bounced30d: bounced,
+      complained30d: complained,
+      bounceRatePct,
+      complaintRatePct: sent > 0 ? Number(((complained / sent) * 100).toFixed(2)) : null,
+      lastEmailActivityAt: isoOrNull(s.last_activity as Date | string | null),
+      lastAuthPassedAt: dom?.lastAuthPassedAt ?? null,
+      recentFailures: failRes.rows.map((r) => ({
+        recipientEmail: String(r.recipient_email),
+        smtpCode: r.smtp_code !== null && r.smtp_code !== undefined ? Number(r.smtp_code) : null,
+        enhancedCode: (r.enhanced_code as string | null) ?? null,
+        smtpResponse: (r.smtp_response as string | null) ?? null,
+        attemptedAt: iso(r.attempted_at as Date | string),
+      })),
+      reputationStatus: 'not_integrated',
+      reputationNote: 'No third-party reputation feed (Google Postmaster / Microsoft SNDS) is integrated.',
+    };
+  }
+
+  async getHostingSummary(
+    orgId: string,
+    domainId: string,
+    domainName: string
+  ): Promise<DomainHostingSummary> {
+    const mbRes = await this.pool.query(
+      `SELECT id::text, email_address::text, display_name, status, used_bytes, quota_bytes, is_catch_all
+         FROM mailboxes
+        WHERE organization_id = $1 AND domain_id = $2
+        ORDER BY created_at DESC`,
+      [orgId, domainId]
+    );
+    const inbRes = await this.pool.query(
+      `SELECT MAX(created_at) AS last_inbound,
+              COUNT(*) FILTER (WHERE state IN ('bounced', 'rejected')) AS err_cnt
+         FROM messages
+        WHERE organization_id = $1
+          AND direction = 'inbound'
+          AND (domain_id = $2 OR LOWER(envelope_from::text) LIKE '%@' || LOWER($3))
+          AND created_at >= NOW() - INTERVAL '30 days'`,
+      [orgId, domainId, domainName]
+    );
+
+    const mailboxes = mbRes.rows.map((r) => ({
+      id: String(r.id),
+      emailAddress: String(r.email_address),
+      displayName: String(r.display_name ?? ''),
+      status: (r.status === 'suspended' ? 'suspended' : 'active') as 'active' | 'suspended',
+      usedBytes: Number(r.used_bytes ?? 0),
+      quotaBytes: Number(r.quota_bytes ?? 0),
+      isCatchAll: Boolean(r.is_catch_all),
+    }));
+
+    return {
+      mailboxCount: mailboxes.length,
+      activeMailboxCount: mailboxes.filter((m) => m.status === 'active').length,
+      catchAllCount: mailboxes.filter((m) => m.isCatchAll).length,
+      totalUsedBytes: mailboxes.reduce((a, b) => a + b.usedBytes, 0),
+      totalQuotaBytes: mailboxes.reduce((a, b) => a + b.quotaBytes, 0),
+      mailboxes,
+      lastInboundAt: isoOrNull(inbRes.rows[0]?.last_inbound as Date | string | null),
+      inboundErrors30d: Number(inbRes.rows[0]?.err_cnt ?? 0),
+    };
+  }
+
+  async recordDomainAudit(entry: {
+    actorUserId: string | null;
+    actorIp: string | null;
+    organizationId: string;
+    domainId: string;
+    action: string;
+    beforeState?: unknown;
+    afterState?: unknown;
+  }): Promise<void> {
+    const uuidRx = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const actorUuid = entry.actorUserId && uuidRx.test(entry.actorUserId) ? entry.actorUserId : null;
+    await this.pool
+      .query(
+        `INSERT INTO audit_logs (id, actor_user_id, actor_ip, organization_id, action, resource_type, resource_id, before_state, after_state)
+         VALUES ($1, $2, $3, $4, $5, 'domain', $6, $7::jsonb, $8::jsonb)`,
+        [
+          uuidv7(),
+          actorUuid,
+          entry.actorIp,
+          entry.organizationId,
+          entry.action,
+          entry.domainId,
+          entry.beforeState !== undefined ? JSON.stringify(entry.beforeState) : null,
+          entry.afterState !== undefined ? JSON.stringify(entry.afterState) : null,
+        ]
+      )
+      .catch(() => undefined);
+  }
+
+  async listDomainAuditEvents(orgId: string, domainId: string): Promise<DomainAuditEvent[]> {
+    const res = await this.pool.query(
+      `SELECT id::text, COALESCE(u.email::text, a.actor_user_id::text, 'system') AS actor,
+              a.actor_ip::text, a.action, a.before_state, a.after_state, a.created_at
+         FROM audit_logs a
+         LEFT JOIN users u ON u.id = a.actor_user_id
+        WHERE a.organization_id = $1 AND a.resource_type = 'domain' AND a.resource_id = $2
+        ORDER BY a.created_at DESC
+        LIMIT 50`,
+      [orgId, domainId]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      actorUserId: String(r.actor ?? 'system'),
+      actorIp: (r.actor_ip as string | null) ?? null,
+      action: String(r.action),
+      beforeState: r.before_state ?? null,
+      afterState: r.after_state ?? null,
+      createdAt: iso(r.created_at as Date | string),
+    }));
+  }
+
+  async deleteDomain(
+    orgId: string,
+    domainId: string,
+    confirmCleanup: boolean
+  ): Promise<{
+    deleted: boolean;
+    blockingDependencies?: {
+      mailboxCount: number;
+      activeCampaignCount: number;
+      recentMessagesCount: number;
+    };
+  }> {
+    const depRes = await this.pool.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM mailboxes WHERE organization_id = $1 AND domain_id = $2) AS mb_cnt,
+         (SELECT COUNT(*)::int FROM campaigns WHERE organization_id = $1 AND domain_id = $2 AND status IN ('draft', 'scheduled', 'running', 'paused')) AS camp_cnt,
+         (SELECT COUNT(*)::int FROM messages WHERE organization_id = $1 AND domain_id = $2 AND state IN ('created', 'queued', 'processing', 'deferred')) AS msg_cnt`,
+      [orgId, domainId]
+    );
+    const deps = depRes.rows[0] ?? {};
+    const mailboxCount = Number(deps.mb_cnt ?? 0);
+    const activeCampaignCount = Number(deps.camp_cnt ?? 0);
+    const recentMessagesCount = Number(deps.msg_cnt ?? 0);
+
+    if (!confirmCleanup && (mailboxCount > 0 || activeCampaignCount > 0 || recentMessagesCount > 0)) {
+      return {
+        deleted: false,
+        blockingDependencies: { mailboxCount, activeCampaignCount, recentMessagesCount },
+      };
     }
-    return updated;
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`UPDATE messages SET domain_id = NULL WHERE organization_id = $1 AND domain_id = $2`, [orgId, domainId]);
+      await client.query(`DELETE FROM campaigns WHERE organization_id = $1 AND domain_id = $2`, [orgId, domainId]);
+      const del = await client.query(`DELETE FROM domains WHERE organization_id = $1 AND id = $2`, [orgId, domainId]);
+      await client.query('COMMIT');
+      return { deleted: (del.rowCount ?? 0) > 0 };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 }
 

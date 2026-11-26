@@ -572,6 +572,49 @@ impl FeedbackStore for PgFeedbackStore {
     }
 }
 
+/// Reloads all active DKIM keys from PostgreSQL into `keyring` atomically.
+///
+/// # Errors
+/// Returns an error if querying PostgreSQL fails.
+pub async fn reload_dkim_keys_from_db(pool: &PgPool, keyring: &DkimKeyRing) -> Result<usize> {
+    let rows = sqlx::query(
+        r"SELECT d.domain_name::text AS domain_name, k.selector, k.algorithm, k.public_key_dns_txt, k.encrypted_private_key
+            FROM dkim_keys k
+            JOIN domains d ON d.id = k.domain_id
+           WHERE k.status = 'active' AND d.is_suspended = FALSE",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut loaded = Vec::with_capacity(rows.len());
+    for row in rows {
+        let domain: String = row.try_get("domain_name").unwrap_or_default();
+        let sel: String = row.try_get("selector").unwrap_or_default();
+        let algo_str: String = row.try_get("algorithm").unwrap_or_default();
+        let pub_txt: String = row.try_get("public_key_dns_txt").unwrap_or_default();
+        let enc: Vec<u8> = row.try_get("encrypted_private_key").unwrap_or_default();
+        let algorithm = if algo_str.eq_ignore_ascii_case("ed25519") {
+            DkimAlgorithm::Ed25519
+        } else {
+            DkimAlgorithm::Rsa2048
+        };
+        if !domain.is_empty() && !enc.is_empty() {
+            loaded.push(StoredDkimKey {
+                dns_record_name: format!("{sel}._domainkey.{domain}"),
+                domain: domain.to_ascii_lowercase(),
+                selector: sel,
+                algorithm,
+                public_key_dns_txt: pub_txt,
+                encrypted_private_key: enc,
+                status: DkimKeyStatus::Active,
+            });
+        }
+    }
+    let count = loaded.len();
+    keyring.replace_all_keys(loaded);
+    Ok(count)
+}
+
 /// Loads encrypted DKIM keys from PostgreSQL `dkim_keys` and persists an initial RSA-2048 key for
 /// `primary_domain` if none exists yet so restarts never invalidate published DNS records.
 pub async fn load_or_seed_dkim_keys(
@@ -583,38 +626,8 @@ pub async fn load_or_seed_dkim_keys(
     auto_generate: bool,
 ) {
     if let Some(pool) = pg_pool {
-        if let Ok(rows) = sqlx::query(
-            r"SELECT d.domain_name::text AS domain_name, k.selector, k.algorithm, k.public_key_dns_txt, k.encrypted_private_key
-                FROM dkim_keys k
-                JOIN domains d ON d.id = k.domain_id
-               WHERE k.status = 'active'",
-        )
-        .fetch_all(pool)
-        .await
-        {
-            for row in rows {
-                let domain: String = row.try_get("domain_name").unwrap_or_default();
-                let sel: String = row.try_get("selector").unwrap_or_default();
-                let algo_str: String = row.try_get("algorithm").unwrap_or_default();
-                let pub_txt: String = row.try_get("public_key_dns_txt").unwrap_or_default();
-                let enc: Vec<u8> = row.try_get("encrypted_private_key").unwrap_or_default();
-                let algorithm = if algo_str.eq_ignore_ascii_case("ed25519") {
-                    DkimAlgorithm::Ed25519
-                } else {
-                    DkimAlgorithm::Rsa2048
-                };
-                if !domain.is_empty() && !enc.is_empty() {
-                    keyring.install_active_key(StoredDkimKey {
-                        dns_record_name: format!("{sel}._domainkey.{domain}"),
-                        domain: domain.to_ascii_lowercase(),
-                        selector: sel,
-                        algorithm,
-                        public_key_dns_txt: pub_txt,
-                        encrypted_private_key: enc,
-                        status: DkimKeyStatus::Active,
-                    });
-                }
-            }
+        if let Err(err) = reload_dkim_keys_from_db(pool, keyring).await {
+            warn!(error = %err, "Failed loading DKIM keys from Postgres");
         }
     }
 

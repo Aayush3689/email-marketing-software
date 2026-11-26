@@ -203,6 +203,36 @@ impl DkimKeyRing {
             .and_then(|g| g.get(&domain.to_ascii_lowercase()).cloned())
             .unwrap_or_default()
     }
+
+    /// Atomically replaces all loaded keys (used during dynamic Postgres reload).
+    pub fn replace_all_keys(&self, keys: Vec<StoredDkimKey>) {
+        let mut next: HashMap<String, Vec<StoredDkimKey>> = HashMap::new();
+        for key in keys {
+            next.entry(key.domain.to_ascii_lowercase())
+                .or_default()
+                .push(key);
+        }
+        if let Ok(mut guard) = self.keys_by_domain.write() {
+            *guard = next;
+        }
+    }
+
+    /// Returns active selector names keyed by normalized domain.
+    #[must_use]
+    pub fn active_selectors_by_domain(&self) -> HashMap<String, Vec<String>> {
+        self.keys_by_domain.read().ok().map_or_default(|g| {
+            g.iter()
+                .map(|(dom, keys)| {
+                    let active_selectors = keys
+                        .iter()
+                        .filter(|k| k.status == DkimKeyStatus::Active)
+                        .map(|k| k.selector.clone())
+                        .collect();
+                    (dom.clone(), active_selectors)
+                })
+                .collect()
+        })
+    }
 }
 
 /// Signs an RFC 5322 email payload using the domain's encrypted DKIM key and prepends
@@ -328,5 +358,45 @@ mod tests {
         let res_ed = resolver.verify_dkim(&auth_ed).await;
         assert_eq!(res_ed.len(), 1);
         assert_eq!(res_ed[0].result(), &DkimResult::Pass);
+    }
+
+    #[test]
+    fn keyring_replace_all_keys_and_active_selectors_work() {
+        let kek = KeyEncryptionKey::from_hex(TEST_KEK_HEX).unwrap();
+        let ring = DkimKeyRing::default();
+
+        let k1 = ring
+            .rotate_key("alpha.test", "mp1", DkimAlgorithm::Rsa2048, &kek)
+            .unwrap();
+        let k2 = ring
+            .rotate_key("beta.test", "s2", DkimAlgorithm::Ed25519, &kek)
+            .unwrap();
+
+        let selectors = ring.active_selectors_by_domain();
+        assert_eq!(
+            selectors
+                .get("alpha.test")
+                .and_then(|v| v.first())
+                .map(String::as_str),
+            Some("mp1")
+        );
+        assert_eq!(
+            selectors
+                .get("beta.test")
+                .and_then(|v| v.first())
+                .map(String::as_str),
+            Some("s2")
+        );
+
+        // Replace keyring atomically from DB snapshot containing only k2
+        ring.replace_all_keys(vec![k2]);
+        assert!(ring.active_key("alpha.test").is_none());
+        assert_eq!(
+            ring.active_key("beta.test")
+                .as_ref()
+                .map(|k| k.selector.as_str()),
+            Some("s2")
+        );
+        assert_eq!(k1.selector, "mp1");
     }
 }

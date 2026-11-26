@@ -22,6 +22,7 @@ describe('@mail/api', () => {
   const authStore = new InMemoryAuthStore();
   const domainStore = new InMemoryDomainStore();
   const credentialsStore = new InMemoryCredentialsStore();
+  const mockTxtRecords = new Map<string, string[]>();
 
   const app = createApp({
     corsOrigins: ['http://localhost:5173'],
@@ -29,6 +30,16 @@ describe('@mail/api', () => {
     jwtSecret: 'test_secret_with_at_least_32_characters_here',
     authStore,
     domainStore,
+    dnsAdapter: {
+      resolveTxt: async (fqdn) => ({ records: mockTxtRecords.get(fqdn.toLowerCase()) ?? [], error: null }),
+      resolveTxtAt: async (_ip, fqdn) => ({ records: mockTxtRecords.get(fqdn.toLowerCase()) ?? [], error: null }),
+      resolveMx: async () => ({ records: [], error: null }),
+      resolve4: async () => ({ records: ['203.0.113.10'], error: null }),
+      resolve6: async () => ({ records: [], error: null }),
+      resolveCname: async () => ({ records: [], error: null }),
+      reverse: async () => ({ records: ['mx1.mailplat.local'], error: null }),
+      fetchMtaStsPolicy: async () => ({ ok: false, status: null, body: null, error: 'none' }),
+    },
     mailboxStore: new InMemoryMailboxStore(),
     credentialsStore,
     marketingStore: new InMemoryMarketingStore(),
@@ -196,7 +207,7 @@ describe('@mail/api', () => {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
       body: JSON.stringify({ domainName: 'sendtest.org', sendingEnabled: true, hostingEnabled: false }),
     });
-    const { domain } = (await domRes.json()) as { domain: { id: string } };
+    const { domain } = (await domRes.json()) as { domain: { id: string; verificationToken: string } };
 
     // Unverified domain must fail 403
     const keyRes = await fetch(`${baseUrl}/v1/api-keys`, {
@@ -219,10 +230,24 @@ describe('@mail/api', () => {
     });
     assert.equal(unverifiedSend.status, 403);
 
-    await fetch(`${baseUrl}/v1/domains/${domain.id}/verify`, {
+    // Without live TXT record, verification must NOT mark domain verified
+    const prematureVerify = await fetch(`${baseUrl}/v1/domains/${domain.id}/verify`, {
       method: 'POST',
       headers: { authorization: `Bearer ${accessToken}` },
     });
+    assert.equal(prematureVerify.status, 200);
+    const prematureJson = (await prematureVerify.json()) as { verified: boolean };
+    assert.equal(prematureJson.verified, false);
+
+    // Publish expected verification TXT and verify cleanly
+    mockTxtRecords.set('_mailplat-verify.sendtest.org', [domain.verificationToken]);
+    const verifiedRes = await fetch(`${baseUrl}/v1/domains/${domain.id}/verify`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    assert.equal(verifiedRes.status, 200);
+    const verifiedJson = (await verifiedRes.json()) as { verified: boolean };
+    assert.equal(verifiedJson.verified, true);
 
     // CRLF injection in subject must fail 400
     const crlf = await fetch(`${baseUrl}/v1/emails`, {
