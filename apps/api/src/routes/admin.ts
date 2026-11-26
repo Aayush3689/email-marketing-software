@@ -203,16 +203,17 @@ export class AdminControlStore {
       const resourceUuid = entry.resourceId && uuidRx.test(entry.resourceId) ? entry.resourceId : randomUUID();
       void pool
         .query(
-          `INSERT INTO audit_logs (id, actor_user_id, action, resource_type, resource_id, metadata, ip_address)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          `INSERT INTO audit_logs (id, actor_user_id, actor_ip, action, resource_type, resource_id, before_state, after_state)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
           [
             uuidRx.test(rec.id) ? rec.id : randomUUID(),
             actorUuid,
+            entry.actorIp,
             entry.action,
             entry.resourceType,
-            resourceUuid,
-            JSON.stringify({ resourceId: entry.resourceId, before: entry.beforeState, after: entry.afterState }),
-            entry.actorIp,
+            entry.resourceId ?? resourceUuid,
+            entry.beforeState !== undefined ? JSON.stringify(entry.beforeState) : null,
+            entry.afterState !== undefined ? JSON.stringify(entry.afterState) : null,
           ]
         )
         .catch(() => undefined);
@@ -243,23 +244,22 @@ export class AdminControlStore {
       }
 
       const logRes = await pool.query(
-        `SELECT id::text, actor_user_id::text, organization_id::text, action, resource_type, resource_id::text, metadata, ip_address::text, created_at
+        `SELECT id::text, actor_user_id::text, actor_ip::text, organization_id::text, action, resource_type, resource_id, before_state, after_state, created_at
            FROM audit_logs ORDER BY created_at DESC LIMIT 200`
       );
       if (logRes.rows.length > 0) {
         this.auditLogs.length = 0;
         for (const r of logRes.rows) {
-          const meta = (r.metadata ?? {}) as { resourceId?: string | null; before?: unknown; after?: unknown };
           this.auditLogs.push({
             id: r.id,
             actorUserId: r.actor_user_id ?? 'system',
-            actorIp: r.ip_address ?? null,
+            actorIp: r.actor_ip ?? null,
             organizationId: r.organization_id ?? null,
             action: r.action,
             resourceType: r.resource_type,
-            resourceId: meta.resourceId ?? r.resource_id ?? null,
-            beforeState: meta.before ?? null,
-            afterState: meta.after ?? null,
+            resourceId: r.resource_id ?? null,
+            beforeState: r.before_state ?? null,
+            afterState: r.after_state ?? null,
             createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
           });
         }

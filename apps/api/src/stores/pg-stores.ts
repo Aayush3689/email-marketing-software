@@ -355,7 +355,7 @@ export class PgDomainStore implements DomainStore {
     organization_id: string;
     domain_name: string;
     verification_token: string;
-    verified_at: Date | string | null;
+    ownership_verified_at: Date | string | null;
     sending_enabled: boolean;
     hosting_enabled: boolean;
     is_suspended: boolean;
@@ -368,7 +368,7 @@ export class PgDomainStore implements DomainStore {
       organizationId: r.organization_id,
       domainName: r.domain_name.toLowerCase(),
       verificationToken: r.verification_token,
-      ownershipVerifiedAt: isoOrNull(r.verified_at),
+      ownershipVerifiedAt: isoOrNull(r.ownership_verified_at),
       sendingEnabled: r.sending_enabled,
       hostingEnabled: r.hosting_enabled,
       isSuspended: r.is_suspended,
@@ -381,7 +381,7 @@ export class PgDomainStore implements DomainStore {
 
   async listDomains(organizationId: string): Promise<DomainRecord[]> {
     const res = await this.pool.query(
-      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.verified_at,
+      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
               d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason, d.created_at,
               (SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' LIMIT 1) AS active_selector
          FROM domains d
@@ -394,7 +394,7 @@ export class PgDomainStore implements DomainStore {
 
   async listAllDomains(): Promise<DomainRecord[]> {
     const res = await this.pool.query(
-      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.verified_at,
+      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
               d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason, d.created_at,
               (SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' LIMIT 1) AS active_selector
          FROM domains d
@@ -410,7 +410,7 @@ export class PgDomainStore implements DomainStore {
   ): Promise<DomainRecord | null> {
     const res = await this.pool.query(
       `UPDATE domains SET is_suspended = $2, suspension_reason = $3 WHERE id = $1
-       RETURNING id::text, organization_id::text, domain_name::text, verification_token, verified_at,
+       RETURNING id::text, organization_id::text, domain_name::text, verification_token, ownership_verified_at,
                  sending_enabled, hosting_enabled, is_suspended, suspension_reason, created_at, 'mp1'::text AS active_selector`,
       [domainId, isSuspended, isSuspended ? suspensionReason : null]
     );
@@ -430,7 +430,7 @@ export class PgDomainStore implements DomainStore {
       const res = await this.pool.query(
         `INSERT INTO domains (id, organization_id, domain_name, verification_token, sending_enabled, hosting_enabled)
          VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id::text, organization_id::text, domain_name::text, verification_token, verified_at,
+         RETURNING id::text, organization_id::text, domain_name::text, verification_token, ownership_verified_at,
                    sending_enabled, hosting_enabled, is_suspended, suspension_reason, created_at, 'mp1'::text AS active_selector`,
         [id, input.organizationId, normalized, token, input.sendingEnabled, input.hostingEnabled]
       );
@@ -445,7 +445,7 @@ export class PgDomainStore implements DomainStore {
 
   async getDomain(organizationId: string, domainId: string): Promise<DomainRecord | null> {
     const res = await this.pool.query(
-      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.verified_at,
+      `SELECT d.id::text, d.organization_id::text, d.domain_name::text, d.verification_token, d.ownership_verified_at,
               d.sending_enabled, d.hosting_enabled, d.is_suspended, d.suspension_reason, d.created_at,
               (SELECT selector FROM dkim_keys k WHERE k.domain_id = d.id AND k.status = 'active' LIMIT 1) AS active_selector
          FROM domains d
@@ -459,7 +459,8 @@ export class PgDomainStore implements DomainStore {
   async markVerified(organizationId: string, domainId: string): Promise<DomainRecord | null> {
     await this.pool.query(
       `UPDATE domains
-          SET verification_status = 'verified', verified_at = COALESCE(verified_at, NOW())
+          SET ownership_verified_at = COALESCE(ownership_verified_at, NOW()),
+              updated_at = NOW()
         WHERE organization_id = $1 AND id = $2`,
       [organizationId, domainId]
     );
@@ -1439,7 +1440,7 @@ export class PgAnalyticsStore implements AnalyticsStore {
     const id = uuidv7();
     const createdAt = input.createdAt ?? new Date().toISOString();
     await this.pool.query(
-      `INSERT INTO email_events (id, organization_id, message_id, event_type, metadata, created_at)
+      `INSERT INTO email_events (id, organization_id, message_id, event_type, metadata, occurred_at)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         id,
@@ -1534,16 +1535,16 @@ export class PgAnalyticsStore implements AnalyticsStore {
   ): Promise<EmailEventRecord[]> {
     const { start, end } = this.resolveSqlWindow(opts.range, opts.from, opts.to);
     const res = await this.pool.query(
-      `SELECT e.id::text, e.organization_id::text, e.message_id::text, e.event_type, e.metadata, e.created_at,
+      `SELECT e.id::text, e.organization_id::text, e.message_id::text, e.event_type, e.metadata, e.occurred_at,
               r.recipient_email::text AS rcpt_email
          FROM email_events e
          LEFT JOIN message_recipients r ON r.id = e.message_recipient_id
         WHERE e.organization_id = $1
-          AND e.created_at >= $2
-          AND e.created_at <= $3
+          AND e.occurred_at >= $2
+          AND e.occurred_at <= $3
           AND ($4::text IS NULL OR e.event_type = $4)
           AND ($5::text IS NULL OR LOWER(COALESCE(r.recipient_email::text, e.metadata->>'recipientEmail', '')) LIKE $5)
-        ORDER BY e.created_at DESC
+        ORDER BY e.occurred_at DESC
         LIMIT 500`,
       [
         orgId,
@@ -1566,7 +1567,7 @@ export class PgAnalyticsStore implements AnalyticsStore {
         latencyMs: Number(m.latencyMs ?? m.durationMs ?? 0),
         campaignId: m.campaignId ? String(m.campaignId) : null,
         detail: m.detail ? String(m.detail) : null,
-        createdAt: iso(r.created_at),
+        createdAt: iso(r.occurred_at),
       };
     });
   }
@@ -1665,13 +1666,26 @@ export class PgAnalyticsStore implements AnalyticsStore {
     return lines.join('\n');
   }
 
+  private toDbPlanSlug(planId: BillingPlan['id']): string {
+    if (planId === 'growth') return 'professional';
+    if (planId === 'scale') return 'business';
+    return planId;
+  }
+
+  private fromDbPlanSlug(slug: string | undefined): BillingPlan['id'] {
+    if (slug === 'professional') return 'growth';
+    if (slug === 'business') return 'scale';
+    if (slug === 'starter' || slug === 'enterprise') return slug;
+    return 'growth';
+  }
+
   async getSubscription(orgId: string): Promise<{
     subscription: SubscriptionRecord;
     plan: BillingPlan;
     monthlyEmailsSent: number;
   }> {
     const res = await this.pool.query(
-      `SELECT p.code AS plan_code, s.status, s.current_period_start, s.current_period_end
+      `SELECT p.slug AS plan_slug, s.status, s.current_period_start, s.current_period_end
          FROM subscriptions s
          JOIN plans p ON p.id = s.plan_id
         WHERE s.organization_id = $1
@@ -1685,7 +1699,7 @@ export class PgAnalyticsStore implements AnalyticsStore {
     end.setUTCMonth(end.getUTCMonth() + 1);
 
     const row = res.rows[0];
-    const planCode = (row?.plan_code as BillingPlan['id'] | undefined) ?? 'growth';
+    const planCode = this.fromDbPlanSlug(row?.plan_slug as string | undefined);
     const plan = BILLING_PLANS.find((p) => p.id === planCode) ?? BILLING_PLANS[1]!;
 
     const cntRes = await this.pool.query<{ cnt: string }>(
@@ -1710,18 +1724,20 @@ export class PgAnalyticsStore implements AnalyticsStore {
     if (!plan) {
       throw new AppError(404, 'PLAN_NOT_FOUND', 'Billing plan not found');
     }
-    const planRow = await this.pool.query(`SELECT id::text FROM plans WHERE code = $1 LIMIT 1`, [planId]);
+    const dbSlug = this.toDbPlanSlug(planId);
+    const planRow = await this.pool.query(`SELECT id::text FROM plans WHERE slug = $1 LIMIT 1`, [dbSlug]);
     let dbPlanId = planRow.rows[0]?.id as string | undefined;
     if (!dbPlanId) {
       dbPlanId = uuidv7();
       await this.pool.query(
-        `INSERT INTO plans (id, code, name, monthly_price_cents, included_emails, overage_per_1k_cents, max_domains, max_mailboxes, max_webhooks)
-         VALUES ($1, $2, $3, $4, $5, 50, $6, $7, 25)`,
+        `INSERT INTO plans (id, slug, name, monthly_price_cents, annual_price_cents, included_emails, max_domains, max_mailboxes, max_storage_gb)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 50)`,
         [
           dbPlanId,
-          plan.id,
+          dbSlug,
           plan.name,
           plan.monthlyPriceUsd * 100,
+          plan.monthlyPriceUsd * 1000,
           plan.includedEmailsPerMonth,
           plan.maxDomains,
           plan.maxMailboxes,
@@ -1741,17 +1757,17 @@ export class PgAnalyticsStore implements AnalyticsStore {
     );
     if ((updated.rowCount ?? 0) === 0) {
       await this.pool.query(
-        `INSERT INTO subscriptions (id, organization_id, plan_id, status, current_period_start, current_period_end)
-         VALUES ($1, $2, $3, 'active', $4, $5)`,
+        `INSERT INTO subscriptions (id, organization_id, plan_id, billing_cycle, status, current_period_start, current_period_end)
+         VALUES ($1, $2, $3, 'monthly', 'active', $4, $5)`,
         [uuidv7(), orgId, dbPlanId, start, end]
       );
     }
 
     const invId = uuidv7();
     await this.pool.query(
-      `INSERT INTO invoices (id, organization_id, amount_cents, currency, status, period_start, period_end)
-       VALUES ($1, $2, $3, 'USD', 'paid', $4, $5)`,
-      [invId, orgId, plan.monthlyPriceUsd * 100, start, end]
+      `INSERT INTO invoices (id, organization_id, amount_cents, currency, status, paid_at)
+       VALUES ($1, $2, $3, 'USD', 'paid', NOW())`,
+      [invId, orgId, plan.monthlyPriceUsd * 100]
     );
     const invoice: InvoiceRecord = {
       id: invId,
@@ -1768,8 +1784,8 @@ export class PgAnalyticsStore implements AnalyticsStore {
 
   async listInvoices(orgId: string): Promise<InvoiceRecord[]> {
     const res = await this.pool.query(
-      `SELECT id::text, organization_id::text, amount_cents, status, period_start, created_at
-         FROM invoices WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 50`,
+      `SELECT id::text, organization_id::text, amount_cents, status, issued_at
+         FROM invoices WHERE organization_id = $1 ORDER BY issued_at DESC LIMIT 50`,
       [orgId]
     );
     return res.rows.map((r) => ({
@@ -1778,8 +1794,8 @@ export class PgAnalyticsStore implements AnalyticsStore {
       planId: 'growth',
       amountUsd: Math.round(Number(r.amount_cents) / 100),
       status: r.status === 'paid' ? 'paid' : 'open',
-      issuedAt: iso(r.created_at),
-      periodLabel: iso(r.period_start).slice(0, 7),
+      issuedAt: iso(r.issued_at),
+      periodLabel: iso(r.issued_at).slice(0, 7),
     }));
   }
 
@@ -1787,7 +1803,7 @@ export class PgAnalyticsStore implements AnalyticsStore {
     const res = await this.pool.query<{ event_type: EmailEventType; cnt: string }>(
       `SELECT event_type, COUNT(*)::text AS cnt
          FROM email_events
-        WHERE created_at >= NOW() - INTERVAL '30 days'
+        WHERE occurred_at >= NOW() - INTERVAL '30 days'
         GROUP BY event_type`
     );
     const counts: Record<EmailEventType, number> = {
