@@ -113,7 +113,14 @@ services:
         apk add --no-cache openssl >/dev/null
         mkdir -p /etc/mail-certs
         DOMAIN="$${TLS_DOMAIN:-$${SMTP_SERVER_DOMAIN:-mx1.fastconnect.in}}"
+        PRIMARY="$${PRIMARY_DOMAIN:-fastconnect.in}"
         LE_DIR="/etc/letsencrypt/live/$${DOMAIN}"
+        if [ ! -s "$${LE_DIR}/fullchain.pem" ] || [ ! -s "$${LE_DIR}/privkey.pem" ]; then
+          if [ -s "/etc/letsencrypt/live/$${PRIMARY}/fullchain.pem" ] && [ -s "/etc/letsencrypt/live/$${PRIMARY}/privkey.pem" ]; then
+            LE_DIR="/etc/letsencrypt/live/$${PRIMARY}"
+            DOMAIN="$${PRIMARY}"
+          fi
+        fi
         if [ -s "$${LE_DIR}/fullchain.pem" ] && [ -s "$${LE_DIR}/privkey.pem" ] && openssl x509 -in "$${LE_DIR}/fullchain.pem" -noout 2>/dev/null; then
           if ! cmp -s "$${LE_DIR}/fullchain.pem" /etc/mail-certs/fullchain.pem || ! cmp -s "$${LE_DIR}/privkey.pem" /etc/mail-certs/privkey.pem; then
             cp -L "$${LE_DIR}/fullchain.pem" /etc/mail-certs/.fullchain.tmp
@@ -124,8 +131,8 @@ services:
           else
             echo "Existing /etc/mail-certs matches Let's Encrypt certificate for $${DOMAIN}"
           fi
-        elif [ -s /etc/mail-certs/fullchain.pem ] && [ -s /etc/mail-certs/privkey.pem ]; then
-          echo "Preserving existing certificates already present in /etc/mail-certs"
+        elif [ -s /etc/mail-certs/fullchain.pem ] && [ -s /etc/mail-certs/privkey.pem ] && openssl x509 -in /etc/mail-certs/fullchain.pem -noout 2>/dev/null; then
+          echo "Preserving existing valid certificates already present in /etc/mail-certs"
         else
           openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
             -subj "/CN=$${DOMAIN}" \
@@ -394,6 +401,7 @@ services:
       - "443:443"
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${LETSENCRYPT_HOST_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
       - ../../certs:/etc/mail-certs:ro
     depends_on:
       tls-init:
