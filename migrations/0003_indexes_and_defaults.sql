@@ -20,10 +20,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_org_created
     ON messages (organization_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_delivery_attempts_rcpt
-    ON delivery_attempts (message_recipient_id, created_at DESC);
+    ON delivery_attempts (message_recipient_id, attempted_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_email_events_org_created
-    ON email_events (organization_id, created_at DESC);
+    ON email_events (organization_id, occurred_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_campaigns_org_status
     ON campaigns (organization_id, status);
