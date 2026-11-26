@@ -209,7 +209,7 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
         `INSERT INTO messages (
            id, organization_id, domain_id, source_type, direction, idempotency_key,
            envelope_from, header_from, subject, message_id_header, body_storage_key, size_bytes, state
-         ) VALUES ($1, $2, $3, 'api', 'outbound', $4, $5, $5, $6, $7, $8, $9, 'queued')`,
+         ) VALUES ($1, $2, $3, 'api', 'outbound', $4, $5::citext, $5::text, $6, $7, $8, $9, 'queued')`,
         [
           messageId,
           params.organizationId,

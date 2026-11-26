@@ -1439,13 +1439,15 @@ export class PgAnalyticsStore implements AnalyticsStore {
   }): Promise<EmailEventRecord> {
     const id = uuidv7();
     const createdAt = input.createdAt ?? new Date().toISOString();
+    const uuidRx = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const dbMessageId = uuidRx.test(input.messageId) ? input.messageId : uuidv7();
     await this.pool.query(
       `INSERT INTO email_events (id, organization_id, message_id, event_type, metadata, occurred_at)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         id,
         input.organizationId,
-        input.messageId,
+        dbMessageId,
         input.eventType,
         JSON.stringify({
           recipientEmail: input.recipientEmail.toLowerCase(),
