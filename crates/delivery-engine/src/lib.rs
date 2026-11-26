@@ -266,7 +266,7 @@ where
     /// Returns a snapshot of all recorded stage latency timings.
     #[must_use]
     pub fn snapshot_timings(&self) -> Vec<DeliveryStageTiming> {
-        self.timings.lock().map_or_default(|g| g.clone())
+        self.timings.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Spawns separate transactional and bulk worker pools, running until receivers close.
