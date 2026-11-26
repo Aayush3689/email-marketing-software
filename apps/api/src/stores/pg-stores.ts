@@ -119,7 +119,7 @@ export class PgAuthStore implements AuthStore {
       `SELECT u.id::text, u.email::text, u.full_name, u.password_hash, u.status, u.platform_role,
               u.mfa_enabled, u.mfa_totp_secret, m.organization_id::text AS org_id, m.role AS org_role
          FROM users u
-         LEFT JOIN memberships m ON m.user_id = u.id
+         LEFT JOIN organization_members m ON m.user_id = u.id
         WHERE LOWER(u.email::text) = LOWER($1) AND u.status != 'deleted'
         ORDER BY m.created_at ASC NULLS LAST
         LIMIT 1`,
@@ -134,7 +134,7 @@ export class PgAuthStore implements AuthStore {
       `SELECT u.id::text, u.email::text, u.full_name, u.password_hash, u.status, u.platform_role,
               u.mfa_enabled, u.mfa_totp_secret, m.organization_id::text AS org_id, m.role AS org_role
          FROM users u
-         LEFT JOIN memberships m ON m.user_id = u.id
+         LEFT JOIN organization_members m ON m.user_id = u.id
         WHERE u.id = $1 AND u.status != 'deleted'
         ORDER BY m.created_at ASC NULLS LAST
         LIMIT 1`,
@@ -150,7 +150,7 @@ export class PgAuthStore implements AuthStore {
               u.platform_role, u.mfa_enabled, u.mfa_totp_secret,
               m.organization_id::text AS org_id, m.role AS org_role
          FROM users u
-         LEFT JOIN memberships m ON m.user_id = u.id
+         LEFT JOIN organization_members m ON m.user_id = u.id
         WHERE u.status != 'deleted'
         ORDER BY u.id, m.created_at ASC NULLS LAST`
     );
@@ -210,8 +210,8 @@ export class PgAuthStore implements AuthStore {
         );
       }
       await client.query(
-        `INSERT INTO memberships (id, user_id, organization_id, role) VALUES ($1, $2, $3, 'owner')
-         ON CONFLICT (user_id, organization_id) DO NOTHING`,
+        `INSERT INTO organization_members (id, user_id, organization_id, role) VALUES ($1, $2, $3, 'owner')
+         ON CONFLICT (organization_id, user_id) DO NOTHING`,
         [uuidv7(), userId, orgId]
       );
       await client.query('COMMIT');
@@ -255,7 +255,7 @@ export class PgAuthStore implements AuthStore {
         [userId, input.email.toLowerCase(), input.passwordHash, input.fullName]
       );
       await client.query(
-        `INSERT INTO memberships (id, user_id, organization_id, role) VALUES ($1, $2, $3, 'owner')`,
+        `INSERT INTO organization_members (id, user_id, organization_id, role) VALUES ($1, $2, $3, 'owner')`,
         [uuidv7(), userId, orgId]
       );
       await client.query('COMMIT');
