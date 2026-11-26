@@ -58,11 +58,11 @@ pub fn classify_feedback_message(
     let mut original_msg_id: Option<String> = None;
 
     for part in &parsed.parts {
-        let ct = part.content_type().map_or_default(|c| {
+        let ct = part.content_type().map(|c| {
             let t = c.ctype().to_ascii_lowercase();
             let sub = c.subtype().unwrap_or("").to_ascii_lowercase();
             format!("{t}/{sub}")
-        });
+        }).unwrap_or_default();
 
         if ct == "message/feedback-report" {
             is_arf = true;
