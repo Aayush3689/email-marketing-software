@@ -7,10 +7,10 @@ RUN cargo build --release --bin mail-engine
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
+    && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system mailplat \
-    && useradd --system --gid mailplat --no-create-home mailplat
+    && groupadd --gid 1000 mailplat \
+    && useradd --uid 1000 --gid 1000 --no-create-home mailplat
 COPY --from=builder /app/target/release/mail-engine /usr/local/bin/mail-engine
 RUN mkdir -p /var/spool/mailplat /etc/mail-certs \
     && chown -R mailplat:mailplat /var/spool/mailplat /etc/mail-certs \

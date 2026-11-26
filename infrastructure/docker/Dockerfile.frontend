@@ -4,6 +4,9 @@ ARG APP_DIR=apps/web
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages ./packages
+COPY apps/api/package.json ./apps/api/package.json
+COPY services/scheduler/package.json ./services/scheduler/package.json
+COPY services/mailbox-service/package.json ./services/mailbox-service/package.json
 COPY apps/web ./apps/web
 COPY apps/mail ./apps/mail
 COPY apps/admin ./apps/admin

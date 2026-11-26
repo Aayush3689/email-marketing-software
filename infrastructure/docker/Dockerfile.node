@@ -4,6 +4,9 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps/api/package.json ./apps/api/package.json
+COPY apps/web/package.json ./apps/web/package.json
+COPY apps/mail/package.json ./apps/mail/package.json
+COPY apps/admin/package.json ./apps/admin/package.json
 COPY services/scheduler/package.json ./services/scheduler/package.json
 COPY services/mailbox-service/package.json ./services/mailbox-service/package.json
 RUN npm ci
