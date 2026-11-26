@@ -1,4 +1,11 @@
 import type {
+  AudienceEstimate,
+  AudienceSelectionSpec,
+  AutomationItem,
+  AutomationRunItem,
+  BroadcastAnalyticsSummary,
+  ContactImportJobItem,
+  CustomFieldDef,
   DnsCheckState,
   DnsRecordEvaluation,
   DkimKeySummary,
@@ -8,7 +15,18 @@ import type {
   DomainHostingSummary,
   DomainNotification,
   EmailEventType,
+  EmailSequenceItem,
+  EmailTemplateBlock,
+  GrowthFormItem,
+  LandingPageItem,
+  SegmentConditionGroup,
+  SegmentConditionRule,
+  SegmentItem,
+  SequenceEnrollmentItem,
+  SubscriberRecord,
+  SubscriberStatus,
   SuppressionReason,
+  TagItem,
 } from '@mail/shared-types';
 
 const TOKEN_KEY = 'mailforge_access_token';
@@ -253,26 +271,32 @@ export interface TemplateItem {
   id: string;
   name: string;
   category: string;
+  description?: string | undefined;
   activeVersion: number;
+  archivedAt?: string | null | undefined;
   versions: Array<{
     versionNumber: number;
     subject: string;
+    previewText?: string | undefined;
     htmlBody: string;
     textBody: string;
+    blocksJson?: EmailTemplateBlock[] | undefined;
     createdAt: string;
   }>;
   createdAt: string;
+  updatedAt?: string | undefined;
 }
 
-export interface ContactItem {
-  id: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  tags: string[];
-  consentSource: string;
-  consentedAt: string;
-  unsubscribedAt: string | null;
+export type ContactItem = SubscriberRecord;
+
+export interface SubscriberProfileResponse {
+  subscriber: SubscriberRecord;
+  events: Array<{ id: string; eventType: string; source: string | null; detail: unknown; createdAt: string }>;
+  deliveries: Array<{ messageId: string; subject: string; state: string; createdAt: string }>;
+  emailActivity: Array<{ id: string; eventType: EmailEventType; detail: string | null; createdAt: string }>;
+  enrollments: SequenceEnrollmentItem[];
+  automationRuns: AutomationRunItem[];
+  suppression: SuppressionItem | null;
 }
 
 export interface CampaignItem {
@@ -280,12 +304,24 @@ export interface CampaignItem {
   domainId: string;
   templateId: string;
   name: string;
-  status: 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'cancelled';
+  status: 'draft' | 'scheduled' | 'sending' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed';
+  fromName?: string | undefined;
+  fromEmail?: string | null | undefined;
+  replyTo?: string | null | undefined;
+  subject?: string | null | undefined;
+  previewText?: string | undefined;
+  htmlBody?: string | null | undefined;
+  textBody?: string | null | undefined;
+  blocksJson?: EmailTemplateBlock[] | undefined;
+  audienceSpec?: AudienceSelectionSpec | undefined;
   timezone: string;
   scheduledAt: string | null;
   tagFilter: string | null;
   targetCount: number;
   sentCount: number;
+  dispatchedAt?: string | null | undefined;
+  completedAt?: string | null | undefined;
+  failureReason?: string | null | undefined;
   createdAt: string;
 }
 
@@ -293,6 +329,9 @@ export interface SuppressionItem {
   id: string;
   email: string;
   reason: SuppressionReason;
+  source?: string | null | undefined;
+  relatedCampaignId?: string | null | undefined;
+  status?: string | undefined;
   createdAt: string;
 }
 
@@ -470,16 +509,161 @@ export const api = {
     }),
   revokeSmtpCredential: (id: string) => apiFetch<void>(`/v1/smtp-credentials/${id}`, { method: 'DELETE' }),
 
-  listTemplates: () => apiFetch<{ templates: TemplateItem[] }>('/v1/templates'),
-  createTemplate: (body: { name: string; category: string; subject: string; htmlBody: string; textBody: string }) =>
-    apiFetch<{ template: TemplateItem }>('/v1/templates', { method: 'POST', body: JSON.stringify(body) }),
+  listTemplates: (includeArchived = false) =>
+    apiFetch<{ templates: TemplateItem[] }>(`/v1/templates${includeArchived ? '?includeArchived=true' : ''}`),
+  createTemplate: (body: {
+    name: string;
+    category: string;
+    description?: string | undefined;
+    subject: string;
+    previewText?: string | undefined;
+    htmlBody: string;
+    textBody: string;
+    blocksJson?: EmailTemplateBlock[] | undefined;
+  }) => apiFetch<{ template: TemplateItem }>('/v1/templates', { method: 'POST', body: JSON.stringify(body) }),
+  updateTemplate: (
+    id: string,
+    body: {
+      name?: string | undefined;
+      category?: string | undefined;
+      description?: string | undefined;
+      archived?: boolean | undefined;
+      subject?: string | undefined;
+      previewText?: string | undefined;
+      htmlBody?: string | undefined;
+      textBody?: string | undefined;
+      blocksJson?: EmailTemplateBlock[] | undefined;
+    }
+  ) => apiFetch<{ template: TemplateItem }>(`/v1/templates/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   duplicateTemplate: (id: string) =>
     apiFetch<{ template: TemplateItem }>(`/v1/templates/${id}/duplicate`, { method: 'POST' }),
+  deleteTemplate: (id: string) => apiFetch<void>(`/v1/templates/${id}`, { method: 'DELETE' }),
+  renderTemplateBlocks: (body: { blocksJson: EmailTemplateBlock[]; subject?: string | undefined; previewText?: string | undefined }) =>
+    apiFetch<{ htmlBody: string; textBody: string }>('/v1/templates/render-blocks', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   previewTemplate: (body: { subject: string; htmlBody: string; variables: Record<string, string> }) =>
     apiFetch<{ subject: string; htmlBody: string }>('/v1/templates/preview', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  listSubscribers: (params?: {
+    search?: string | undefined;
+    status?: SubscriberStatus | undefined;
+    tag?: string | undefined;
+    tagId?: string | undefined;
+    segmentId?: string | undefined;
+    source?: string | undefined;
+    customFieldKey?: string | undefined;
+    customFieldValue?: string | undefined;
+    sort?: 'recent' | 'oldest' | 'engagement' | 'email' | undefined;
+    page?: number | undefined;
+    pageSize?: number | undefined;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.search) qs.set('search', params.search);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.tag) qs.set('tag', params.tag);
+    if (params?.tagId) qs.set('tagId', params.tagId);
+    if (params?.segmentId) qs.set('segmentId', params.segmentId);
+    if (params?.source) qs.set('source', params.source);
+    if (params?.customFieldKey) qs.set('customFieldKey', params.customFieldKey);
+    if (params?.customFieldValue) qs.set('customFieldValue', params.customFieldValue);
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.pageSize) qs.set('pageSize', String(params.pageSize));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<{ subscribers: SubscriberRecord[]; total: number; page: number; pageSize: number }>(`/v1/subscribers${suffix}`);
+  },
+  upsertSubscriber: (body: {
+    email: string;
+    firstName?: string | undefined;
+    lastName?: string | undefined;
+    status?: 'subscribed' | 'unsubscribed' | 'pending_confirmation' | undefined;
+    tags?: string[] | undefined;
+    attributes?: Record<string, string | number | boolean | null> | undefined;
+    consentSource: string;
+  }) => apiFetch<{ subscriber: SubscriberRecord; created: boolean }>('/v1/subscribers', { method: 'POST', body: JSON.stringify(body) }),
+  getSubscriberProfile: (id: string) => apiFetch<SubscriberProfileResponse>(`/v1/subscribers/${id}`),
+  updateSubscriber: (
+    id: string,
+    body: {
+      firstName?: string | undefined;
+      lastName?: string | undefined;
+      attributes?: Record<string, string | number | boolean | null> | undefined;
+      addTags?: string[] | undefined;
+      removeTags?: string[] | undefined;
+    }
+  ) => apiFetch<{ subscriber: SubscriberRecord }>(`/v1/subscribers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  unsubscribeSubscriber: (id: string, reason?: string | undefined) =>
+    apiFetch<{ subscriber: SubscriberRecord }>(`/v1/subscribers/${id}/unsubscribe`, {
+      method: 'POST',
+      body: JSON.stringify({ ...(reason ? { reason } : {}) }),
+    }),
+  resubscribeSubscriber: (id: string, consentSource: string) =>
+    apiFetch<{ subscriber: SubscriberRecord }>(`/v1/subscribers/${id}/resubscribe`, {
+      method: 'POST',
+      body: JSON.stringify({ consentSource, confirmedByConsent: true }),
+    }),
+  deleteSubscriber: (id: string) => apiFetch<void>(`/v1/subscribers/${id}`, { method: 'DELETE' }),
+  bulkSubscribersAction: (body: {
+    ids: string[];
+    action: 'add_tag' | 'remove_tag' | 'unsubscribe' | 'delete';
+    tagName?: string | undefined;
+  }) => apiFetch<{ affected: number }>('/v1/subscribers/bulk', { method: 'POST', body: JSON.stringify(body) }),
+  importSubscribersCsv: (body: {
+    fileName: string | null;
+    consentSource: string;
+    defaultTags: string[];
+    fieldMapping: Record<string, string>;
+    csvText: string;
+  }) => apiFetch<{ job: ContactImportJobItem }>('/v1/subscribers/import-csv', { method: 'POST', body: JSON.stringify(body) }),
+  listImportJobs: () => apiFetch<{ jobs: ContactImportJobItem[] }>('/v1/subscribers/import-jobs'),
+  downloadSubscribersCsv: async (params?: { search?: string | undefined; status?: string | undefined; tag?: string | undefined; segmentId?: string | undefined; ids?: string[] | undefined }) => {
+    const token = getStoredToken();
+    const qs = new URLSearchParams();
+    if (params?.search) qs.set('search', params.search);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.tag) qs.set('tag', params.tag);
+    if (params?.segmentId) qs.set('segmentId', params.segmentId);
+    if (params?.ids?.length) qs.set('ids', params.ids.join(','));
+    const res = await fetch(`/v1/subscribers/export.csv${qs.toString() ? `?${qs.toString()}` : ''}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`Export failed (${res.status})`);
+    return res.text();
+  },
+  downloadImportErrorsCsv: async (jobId: string) => {
+    const token = getStoredToken();
+    const res = await fetch(`/v1/subscribers/import-jobs/${jobId}/errors.csv`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`Error report download failed (${res.status})`);
+    return res.text();
+  },
+
+  listTags: () => apiFetch<{ tags: TagItem[] }>('/v1/tags'),
+  createTag: (body: { name: string; description?: string | undefined; color?: string | undefined }) =>
+    apiFetch<{ tag: TagItem }>('/v1/tags', { method: 'POST', body: JSON.stringify(body) }),
+  updateTag: (id: string, body: { name?: string | undefined; description?: string | undefined; color?: string | undefined }) =>
+    apiFetch<{ tag: TagItem }>(`/v1/tags/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteTag: (id: string) => apiFetch<void>(`/v1/tags/${id}`, { method: 'DELETE' }),
+
+  listCustomFields: () => apiFetch<{ customFields: CustomFieldDef[] }>('/v1/custom-fields'),
+  createCustomField: (body: { fieldKey: string; label: string; fieldType: 'text' | 'number' | 'date' | 'boolean'; description?: string | undefined }) =>
+    apiFetch<{ customField: CustomFieldDef }>('/v1/custom-fields', { method: 'POST', body: JSON.stringify(body) }),
+  deleteCustomField: (id: string) => apiFetch<void>(`/v1/custom-fields/${id}`, { method: 'DELETE' }),
+
+  listSegments: () => apiFetch<{ segments: SegmentItem[] }>('/v1/segments'),
+  previewSegment: (body: { matchType: 'all' | 'any'; conditions: Array<SegmentConditionRule | SegmentConditionGroup> }) =>
+    apiFetch<{ count: number; sample: SubscriberRecord[] }>('/v1/segments/preview', { method: 'POST', body: JSON.stringify(body) }),
+  createSegment: (body: { name: string; description?: string | undefined; matchType: 'all' | 'any'; conditions: Array<SegmentConditionRule | SegmentConditionGroup> }) =>
+    apiFetch<{ segment: SegmentItem }>('/v1/segments', { method: 'POST', body: JSON.stringify(body) }),
+  updateSegment: (id: string, body: { name?: string | undefined; description?: string | undefined; matchType?: 'all' | 'any' | undefined; conditions?: Array<SegmentConditionRule | SegmentConditionGroup> | undefined }) =>
+    apiFetch<{ segment: SegmentItem }>(`/v1/segments/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteSegment: (id: string) => apiFetch<void>(`/v1/segments/${id}`, { method: 'DELETE' }),
 
   listContacts: (tag?: string) =>
     apiFetch<{ contacts: ContactItem[] }>(tag ? `/v1/contacts?tag=${encodeURIComponent(tag)}` : '/v1/contacts'),
@@ -493,24 +677,100 @@ export const api = {
     }),
 
   listCampaigns: () => apiFetch<{ campaigns: CampaignItem[] }>('/v1/campaigns'),
+  estimateCampaignAudience: (spec: AudienceSelectionSpec) =>
+    apiFetch<{ estimate: AudienceEstimate; sample: SubscriberRecord[] }>('/v1/campaigns/estimate-audience', {
+      method: 'POST',
+      body: JSON.stringify(spec),
+    }),
   createCampaign: (body: {
     domainId: string;
-    templateId: string;
+    templateId?: string | undefined;
     name: string;
+    fromName?: string | undefined;
+    fromEmail?: string | null | undefined;
+    replyTo?: string | null | undefined;
+    subject?: string | null | undefined;
+    previewText?: string | undefined;
+    htmlBody?: string | null | undefined;
+    textBody?: string | null | undefined;
+    blocksJson?: EmailTemplateBlock[] | undefined;
+    audienceSpec?: AudienceSelectionSpec | undefined;
     timezone: string;
     scheduledAt: string | null;
     tagFilter: string | null;
   }) => apiFetch<{ campaign: CampaignItem }>('/v1/campaigns', { method: 'POST', body: JSON.stringify(body) }),
-  transitionCampaign: (id: string, action: 'pause' | 'resume' | 'cancel') =>
-    apiFetch<{ campaign: CampaignItem }>(`/v1/campaigns/${id}/${action}`, { method: 'POST' }),
+  updateCampaign: (id: string, body: Record<string, unknown>) =>
+    apiFetch<{ campaign: CampaignItem }>(`/v1/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteCampaign: (id: string) => apiFetch<void>(`/v1/campaigns/${id}`, { method: 'DELETE' }),
+  sendCampaignTest: (id: string, toEmail: string) =>
+    apiFetch<{ sent: boolean; toEmail: string }>(`/v1/campaigns/${id}/send-test`, {
+      method: 'POST',
+      body: JSON.stringify({ toEmail }),
+    }),
+  getBroadcastAnalytics: (id: string) =>
+    apiFetch<{ analytics: BroadcastAnalyticsSummary }>(`/v1/campaigns/${id}/analytics`),
+  transitionCampaign: (id: string, action: 'pause' | 'resume' | 'start' | 'cancel') =>
+    apiFetch<{
+      campaign: CampaignItem;
+      dispatchedCount?: number;
+      cancelReport?: { cancelledCount: number; handedOffCount: number };
+    }>(`/v1/campaigns/${id}/${action}`, { method: 'POST' }),
 
-  listSuppressions: () => apiFetch<{ suppressions: SuppressionItem[] }>('/v1/suppressions'),
+  listSuppressions: (params?: { search?: string | undefined; reason?: string | undefined }) => {
+    const qs = new URLSearchParams();
+    if (params?.search) qs.set('search', params.search);
+    if (params?.reason) qs.set('reason', params.reason);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<{ suppressions: SuppressionItem[] }>(`/v1/suppressions${suffix}`);
+  },
   addSuppression: (body: { email: string; reason: SuppressionReason }) =>
     apiFetch<{ suppression: SuppressionItem }>('/v1/suppressions', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   removeSuppression: (id: string) => apiFetch<void>(`/v1/suppressions/${id}`, { method: 'DELETE' }),
+
+  listSequences: () => apiFetch<{ sequences: EmailSequenceItem[] }>('/v1/sequences'),
+  createSequence: (body: Record<string, unknown>) =>
+    apiFetch<{ sequence: EmailSequenceItem }>('/v1/sequences', { method: 'POST', body: JSON.stringify(body) }),
+  updateSequence: (id: string, body: Record<string, unknown>) =>
+    apiFetch<{ sequence: EmailSequenceItem }>(`/v1/sequences/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteSequence: (id: string) => apiFetch<void>(`/v1/sequences/${id}`, { method: 'DELETE' }),
+  enrollInSequence: (id: string, subscriberId: string) =>
+    apiFetch<{ enrollment: SequenceEnrollmentItem }>(`/v1/sequences/${id}/enroll`, {
+      method: 'POST',
+      body: JSON.stringify({ subscriberId }),
+    }),
+  listSequenceEnrollments: (id: string) =>
+    apiFetch<{ enrollments: SequenceEnrollmentItem[] }>(`/v1/sequences/${id}/enrollments`),
+
+  listAutomations: () => apiFetch<{ automations: AutomationItem[] }>('/v1/automations'),
+  createAutomation: (body: Record<string, unknown>) =>
+    apiFetch<{ automation: AutomationItem }>('/v1/automations', { method: 'POST', body: JSON.stringify(body) }),
+  updateAutomation: (id: string, body: Record<string, unknown>) =>
+    apiFetch<{ automation: AutomationItem }>(`/v1/automations/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteAutomation: (id: string) => apiFetch<void>(`/v1/automations/${id}`, { method: 'DELETE' }),
+  listAutomationRuns: (automationId?: string) =>
+    apiFetch<{ runs: AutomationRunItem[] }>(`/v1/automations/runs${automationId ? `?automationId=${encodeURIComponent(automationId)}` : ''}`),
+  triggerAutomation: (id: string, subscriberId: string) =>
+    apiFetch<{ run: AutomationRunItem }>(`/v1/automations/${id}/trigger`, {
+      method: 'POST',
+      body: JSON.stringify({ subscriberId }),
+    }),
+
+  listForms: () => apiFetch<{ forms: GrowthFormItem[] }>('/v1/forms'),
+  createForm: (body: Record<string, unknown>) =>
+    apiFetch<{ form: GrowthFormItem }>('/v1/forms', { method: 'POST', body: JSON.stringify(body) }),
+  updateForm: (id: string, body: Record<string, unknown>) =>
+    apiFetch<{ form: GrowthFormItem }>(`/v1/forms/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteForm: (id: string) => apiFetch<void>(`/v1/forms/${id}`, { method: 'DELETE' }),
+
+  listLandingPages: () => apiFetch<{ landingPages: LandingPageItem[] }>('/v1/landing-pages'),
+  createLandingPage: (body: Record<string, unknown>) =>
+    apiFetch<{ landingPage: LandingPageItem }>('/v1/landing-pages', { method: 'POST', body: JSON.stringify(body) }),
+  updateLandingPage: (id: string, body: Record<string, unknown>) =>
+    apiFetch<{ landingPage: LandingPageItem }>(`/v1/landing-pages/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteLandingPage: (id: string) => apiFetch<void>(`/v1/landing-pages/${id}`, { method: 'DELETE' }),
 
   listWebhooks: () => apiFetch<{ webhooks: WebhookEndpointItem[] }>('/v1/webhooks'),
   createWebhook: (body: { url: string; eventTypes: EmailEventType[] }) =>

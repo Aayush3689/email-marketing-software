@@ -38,7 +38,7 @@ const NAV_ITEMS = [
   { to: '/', label: 'Overview', icon: BarChart3, end: true },
   { to: '/domains', label: 'Domains & DNS', icon: Globe, end: false },
   { to: '/credentials', label: 'API & SMTP Keys', icon: KeyRound, end: false },
-  { to: '/campaigns', label: 'Templates & Campaigns', icon: Megaphone, end: false },
+  { to: '/campaigns', label: 'Marketing & Audience', icon: Megaphone, end: false },
   { to: '/webhooks', label: 'Webhooks & Events', icon: Webhook, end: false },
   { to: '/billing', label: 'Billing & Quotas', icon: CreditCard, end: false },
 ] as const;

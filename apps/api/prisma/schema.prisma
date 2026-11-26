@@ -215,3 +215,343 @@ model Mailbox {
   @@unique([domainId, localPart])
   @@map("mailboxes")
 }
+
+model Contact {
+  id               String    @id @db.Uuid
+  organizationId   String    @map("organization_id") @db.Uuid
+  email            String    @db.Citext
+  firstName        String?   @map("first_name")
+  lastName         String?   @map("last_name")
+  status           String    @default("subscribed")
+  tags             String[]  @default([])
+  attributes       Json      @default("{}")
+  consentSource    String    @map("consent_source")
+  consentedAt      DateTime  @default(now()) @map("consented_at") @db.Timestamptz
+  unsubscribedAt   DateTime? @map("unsubscribed_at") @db.Timestamptz
+  lastActivityAt   DateTime? @map("last_activity_at") @db.Timestamptz
+  engagementScore  Int       @default(0) @map("engagement_score")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+
+  subscriberTags      SubscriberTag[]
+  subscriberEvents    SubscriberEvent[]
+  sequenceEnrollments SequenceEnrollment[]
+  automationRuns      AutomationRun[]
+
+  @@unique([organizationId, email])
+  @@map("contacts")
+}
+
+model Tag {
+  id             String   @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String   @db.Citext
+  description    String   @default("")
+  color          String   @default("#2563eb")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  subscriberTags SubscriberTag[]
+
+  @@unique([organizationId, name])
+  @@map("tags")
+}
+
+model SubscriberTag {
+  subscriberId String   @map("subscriber_id") @db.Uuid
+  tagId        String   @map("tag_id") @db.Uuid
+  assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz
+
+  subscriber Contact @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  tag        Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([subscriberId, tagId])
+  @@map("subscriber_tags")
+}
+
+model CustomField {
+  id             String   @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  fieldKey       String   @map("field_key")
+  label          String
+  fieldType      String   @default("text") @map("field_type")
+  description    String   @default("")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@unique([organizationId, fieldKey])
+  @@map("custom_fields")
+}
+
+model SubscriberEvent {
+  id             String   @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  subscriberId   String   @map("subscriber_id") @db.Uuid
+  eventType      String   @map("event_type")
+  source         String?
+  detail         Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  subscriber Contact @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+
+  @@map("subscriber_events")
+}
+
+model Segment {
+  id             String   @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  description    String   @default("")
+  matchType      String   @default("all") @map("match_type")
+  conditions     Json     @default("[]")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  @@map("segments")
+}
+
+model ContactImportJob {
+  id                  String    @id @db.Uuid
+  organizationId      String    @map("organization_id") @db.Uuid
+  status              String    @default("queued")
+  fileName            String?   @map("file_name")
+  consentSource       String    @map("consent_source")
+  defaultTags         String[]  @default([]) @map("default_tags")
+  fieldMapping        Json      @default("{}") @map("field_mapping")
+  totalRows           Int       @default(0) @map("total_rows")
+  importedCount       Int       @default(0) @map("imported_count")
+  updatedCount        Int       @default(0) @map("updated_count")
+  skippedDuplicates   Int       @default(0) @map("skipped_duplicates")
+  invalidCount        Int       @default(0) @map("invalid_count")
+  suppressedCount     Int       @default(0) @map("suppressed_count")
+  missingConsentCount Int       @default(0) @map("missing_consent_count")
+  failedCount         Int       @default(0) @map("failed_count")
+  errorReport         Json      @default("[]") @map("error_report")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz
+
+  @@map("contact_import_jobs")
+}
+
+model Template {
+  id             String    @id @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String
+  category       String    @default("transactional")
+  description    String    @default("")
+  activeVersion  Int       @default(1) @map("active_version")
+  archivedAt     DateTime? @map("archived_at") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+
+  versions TemplateVersion[]
+
+  @@map("templates")
+}
+
+model TemplateVersion {
+  id             String   @id @db.Uuid
+  templateId     String   @map("template_id") @db.Uuid
+  versionNumber  Int      @map("version_number")
+  subject        String
+  previewText    String   @default("") @map("preview_text")
+  htmlBody       String   @default("") @map("html_body")
+  textBody       String   @default("") @map("text_body")
+  blocksJson     Json     @default("[]") @map("blocks_json")
+  variableSchema Json     @default("{}") @map("variable_schema")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  template Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, versionNumber])
+  @@map("template_versions")
+}
+
+model Campaign {
+  id                String    @id @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  domainId          String    @map("domain_id") @db.Uuid
+  templateVersionId String?   @map("template_version_id") @db.Uuid
+  name              String
+  status            String    @default("draft")
+  fromName          String    @default("") @map("from_name")
+  fromEmail         String?   @map("from_email")
+  replyTo           String?   @map("reply_to")
+  subject           String?
+  previewText       String    @default("") @map("preview_text")
+  htmlBody          String?   @map("html_body")
+  textBody          String?   @map("text_body")
+  blocksJson        Json      @default("[]") @map("blocks_json")
+  audienceSpec      Json      @default("{}") @map("audience_spec")
+  timezone          String    @default("UTC")
+  scheduledAt       DateTime? @map("scheduled_at") @db.Timestamptz
+  dispatchedAt      DateTime? @map("dispatched_at") @db.Timestamptz
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz
+  failureReason     String?   @map("failure_reason")
+  targetFilter      Json      @default("{}") @map("target_filter")
+  statsCache        Json      @default("{}") @map("stats_cache")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+
+  recipients CampaignRecipient[]
+
+  @@map("campaigns")
+}
+
+model CampaignRecipient {
+  id             String   @id @db.Uuid
+  campaignId     String   @map("campaign_id") @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  subscriberId   String?  @map("subscriber_id") @db.Uuid
+  recipientEmail String   @map("recipient_email") @db.Citext
+  status         String   @default("pending")
+  messageId      String?  @map("message_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, recipientEmail])
+  @@map("campaign_recipients")
+}
+
+model EmailSequence {
+  id                String   @id @db.Uuid
+  organizationId    String   @map("organization_id") @db.Uuid
+  domainId          String?  @map("domain_id") @db.Uuid
+  name              String
+  description       String   @default("")
+  fromName          String   @default("") @map("from_name")
+  fromEmail         String?  @map("from_email")
+  replyTo           String?  @map("reply_to")
+  enabled           Boolean  @default(false)
+  allowReentry      Boolean  @default(false) @map("allow_reentry")
+  exitOnUnsubscribe Boolean  @default(true) @map("exit_on_unsubscribe")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  steps       SequenceStep[]
+  enrollments SequenceEnrollment[]
+
+  @@map("email_sequences")
+}
+
+model SequenceStep {
+  id          String   @id @db.Uuid
+  sequenceId  String   @map("sequence_id") @db.Uuid
+  position    Int
+  delayDays   Int      @default(0) @map("delay_days")
+  delayHours  Int      @default(0) @map("delay_hours")
+  subject     String
+  previewText String   @default("") @map("preview_text")
+  htmlBody    String   @default("") @map("html_body")
+  textBody    String   @default("") @map("text_body")
+  blocksJson  Json     @default("[]") @map("blocks_json")
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  sequence EmailSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+
+  @@map("sequence_steps")
+}
+
+model SequenceEnrollment {
+  id               String    @id @db.Uuid
+  organizationId   String    @map("organization_id") @db.Uuid
+  sequenceId       String    @map("sequence_id") @db.Uuid
+  subscriberId     String    @map("subscriber_id") @db.Uuid
+  currentStepIndex Int       @default(0) @map("current_step_index")
+  status           String    @default("active")
+  nextSendAt       DateTime? @map("next_send_at") @db.Timestamptz
+  lastSentAt       DateTime? @map("last_sent_at") @db.Timestamptz
+  exitedReason     String?   @map("exited_reason")
+  enrolledAt       DateTime  @default(now()) @map("enrolled_at") @db.Timestamptz
+  completedAt      DateTime? @map("completed_at") @db.Timestamptz
+
+  sequence   EmailSequence @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
+  subscriber Contact       @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+
+  @@map("sequence_enrollments")
+}
+
+model Automation {
+  id             String   @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  description    String   @default("")
+  status         String   @default("draft")
+  triggerType    String   @map("trigger_type")
+  triggerConfig  Json     @default("{}") @map("trigger_config")
+  nodes          Json     @default("[]")
+  edges          Json     @default("[]")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  runs AutomationRun[]
+
+  @@map("automations")
+}
+
+model AutomationRun {
+  id            String    @id @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  automationId  String    @map("automation_id") @db.Uuid
+  subscriberId  String    @map("subscriber_id") @db.Uuid
+  currentNodeId String?   @map("current_node_id")
+  status        String    @default("running")
+  nextRunAt     DateTime? @map("next_run_at") @db.Timestamptz
+  context       Json      @default("{}")
+  startedAt     DateTime  @default(now()) @map("started_at") @db.Timestamptz
+  updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz
+  completedAt   DateTime? @map("completed_at") @db.Timestamptz
+
+  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  subscriber Contact    @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+
+  @@map("automation_runs")
+}
+
+model Form {
+  id              String   @id @db.Uuid
+  organizationId  String   @map("organization_id") @db.Uuid
+  name            String
+  formType        String   @default("inline") @map("form_type")
+  title           String   @default("Join our newsletter")
+  description     String   @default("")
+  buttonText      String   @default("Subscribe") @map("button_text")
+  successMessage  String   @default("Thanks for subscribing!") @map("success_message")
+  redirectUrl     String?  @map("redirect_url")
+  consentText     String   @default("I agree to receive email updates.") @map("consent_text")
+  doubleOptIn    Boolean  @default(false) @map("double_opt_in")
+  fields          Json     @default("[]")
+  tagIds          String[] @default([]) @map("tag_ids") @db.Uuid
+  published       Boolean  @default(true)
+  submissionCount Int      @default(0) @map("submission_count")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  @@map("forms")
+}
+
+model LandingPage {
+  id              String   @id @db.Uuid
+  organizationId  String   @map("organization_id") @db.Uuid
+  slug            String   @unique @db.Citext
+  title           String
+  headline        String
+  subheadline     String   @default("")
+  bodyHtml        String   @default("") @map("body_html")
+  heroImageUrl    String?  @map("hero_image_url")
+  templateKey     String   @default("minimal") @map("template_key")
+  buttonText      String   @default("Get Updates") @map("button_text")
+  customDomain    String?  @map("custom_domain") @db.Citext
+  formId          String?  @map("form_id") @db.Uuid
+  tagIds          String[] @default([]) @map("tag_ids") @db.Uuid
+  published       Boolean  @default(false)
+  viewsCount      Int      @default(0) @map("views_count")
+  conversionCount Int      @default(0) @map("conversion_count")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  @@map("landing_pages")
+}

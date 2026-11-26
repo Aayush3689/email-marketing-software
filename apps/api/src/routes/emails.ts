@@ -21,7 +21,11 @@ export interface EmailSubmissionStore {
     subject: string;
     bodyStorageKey: string;
     sizeBytes: number;
-  }): Promise<{ messageId: string; recipientCount: number; deduplicated: boolean }>;
+    sourceType?: 'api' | 'campaign';
+    campaignId?: string;
+    recipientId?: string;
+    routingKey?: 'mail.outbound.transactional' | 'mail.outbound.bulk';
+  }): Promise<{ messageId: string; recipientId?: string; recipientCount: number; deduplicated: boolean }>;
 }
 
 export interface SpoolWriter {
@@ -159,7 +163,11 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
     subject: string;
     bodyStorageKey: string;
     sizeBytes: number;
-  }): Promise<{ messageId: string; recipientCount: number; deduplicated: boolean }> {
+    sourceType?: 'api' | 'campaign';
+    campaignId?: string;
+    recipientId?: string;
+    routingKey?: 'mail.outbound.transactional' | 'mail.outbound.bulk';
+  }): Promise<{ messageId: string; recipientId?: string; recipientCount: number; deduplicated: boolean }> {
     const client = await this.queryable.connect();
     try {
       await client.query('BEGIN');
@@ -223,16 +231,21 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
       const senderDomain = params.from.split('@')[1]?.toLowerCase() ?? 'mail.platform.local';
       const msgIdHeader = `<${messageId}@${senderDomain}>`;
       const effectiveEnvelopeFrom = params.envelopeFrom ?? params.from;
+      const effectiveSource = params.sourceType ?? 'api';
+      const effectiveRoutingKey =
+        params.routingKey ?? (effectiveSource === 'campaign' ? 'mail.outbound.bulk' : 'mail.outbound.transactional');
 
       await client.query(
         `INSERT INTO messages (
-           id, organization_id, domain_id, source_type, direction, idempotency_key,
+           id, organization_id, domain_id, campaign_id, source_type, direction, idempotency_key,
            envelope_from, header_from, subject, message_id_header, body_storage_key, size_bytes, state
-         ) VALUES ($1, $2, $3, 'api', 'outbound', $4, $5::citext, $6::text, $7, $8, $9, $10, 'queued')`,
+         ) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7::citext, $8::text, $9, $10, $11, $12, 'queued')`,
         [
           messageId,
           params.organizationId,
           params.domainId,
+          params.campaignId ?? null,
+          effectiveSource,
           params.idempotencyKey ?? null,
           effectiveEnvelopeFrom,
           params.from,
@@ -243,8 +256,11 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
         ]
       );
 
+      let firstRecipientId: string | undefined;
       for (const recipientEmail of params.recipients) {
-        const recipientId = uuidv7();
+        const recipientId =
+          params.recipientId && params.recipients.length === 1 ? params.recipientId : uuidv7();
+        if (!firstRecipientId) firstRecipientId = recipientId;
         const domain = recipientEmail.split('@')[1]?.toLowerCase() ?? 'unknown';
 
         await client.query(
@@ -259,7 +275,7 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
           recipientId,
           organizationId: params.organizationId,
           domainId: params.domainId,
-          sourceType: 'api',
+          sourceType: effectiveSource,
           envelopeFrom: effectiveEnvelopeFrom,
           recipientEmail,
           bodyStorageKey: params.bodyStorageKey,
@@ -270,14 +286,15 @@ export class PgEmailSubmissionStore implements EmailSubmissionStore {
 
         await client.query(
           `INSERT INTO outbox_events (aggregate_type, aggregate_id, exchange, routing_key, payload)
-           VALUES ('message', $1, 'mail.events', 'mail.outbound.transactional', $2::jsonb)`,
-          [messageId, JSON.stringify(job)]
+           VALUES ('message', $1, 'mail.events', $2, $3::jsonb)`,
+          [messageId, effectiveRoutingKey, JSON.stringify(job)]
         );
       }
 
       await client.query('COMMIT');
       return {
         messageId,
+        ...(firstRecipientId ? { recipientId: firstRecipientId } : {}),
         recipientCount: params.recipients.length,
         deduplicated: false,
       };

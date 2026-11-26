@@ -29,6 +29,9 @@ export interface TrackingTokenRecord {
   recipientEmail: string;
   kind: 'open' | 'click' | 'unsubscribe';
   targetUrl: string | null;
+  campaignId?: string | null;
+  domainId?: string | null;
+  subscriberId?: string | null;
   createdAt: string;
 }
 
@@ -192,6 +195,9 @@ export class InMemoryAnalyticsStore {
     recipientEmail: string;
     kind: 'open' | 'click' | 'unsubscribe';
     targetUrl?: string | null;
+    campaignId?: string | null;
+    domainId?: string | null;
+    subscriberId?: string | null;
   }): TrackingTokenRecord {
     const rec: TrackingTokenRecord = {
       token: randomBytes(18).toString('base64url'),
@@ -200,6 +206,9 @@ export class InMemoryAnalyticsStore {
       recipientEmail: input.recipientEmail.toLowerCase(),
       kind: input.kind,
       targetUrl: input.targetUrl ?? null,
+      campaignId: input.campaignId ?? null,
+      domainId: input.domainId ?? null,
+      subscriberId: input.subscriberId ?? null,
       createdAt: new Date().toISOString(),
     };
     this.tokens.set(rec.token, rec);
@@ -656,6 +665,7 @@ export function createPublicTrackingRouter(deps: {
         recipientEmail: rec.recipientEmail,
         eventType: 'opened',
         domain,
+        ...(rec.campaignId ? { campaignId: rec.campaignId } : {}),
         detail: 'open_pixel',
       });
     }
@@ -679,6 +689,7 @@ export function createPublicTrackingRouter(deps: {
       recipientEmail: rec.recipientEmail,
       eventType: 'clicked',
       domain,
+      ...(rec.campaignId ? { campaignId: rec.campaignId } : {}),
       detail: rec.targetUrl,
     });
     res.redirect(302, rec.targetUrl);
@@ -692,7 +703,11 @@ export function createPublicTrackingRouter(deps: {
     const suppression = await deps.marketingStore.addSuppression(
       rec.organizationId,
       rec.recipientEmail,
-      'unsubscribe'
+      'unsubscribe',
+      {
+        source: 'rfc8058_one_click',
+        ...(rec.campaignId ? { relatedCampaignId: rec.campaignId } : {}),
+      }
     );
     const domain = rec.recipientEmail.split('@')[1] ?? 'unknown';
     await deps.analyticsStore.recordEvent({
@@ -701,6 +716,7 @@ export function createPublicTrackingRouter(deps: {
       recipientEmail: rec.recipientEmail,
       eventType: 'unsubscribed',
       domain,
+      ...(rec.campaignId ? { campaignId: rec.campaignId } : {}),
       detail: 'rfc8058_one_click',
     });
     return { rec, suppression };

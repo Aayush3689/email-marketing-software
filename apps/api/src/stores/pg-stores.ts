@@ -1600,8 +1600,9 @@ export class PgMarketingStore implements MarketingStore {
 
   async listContacts(orgId: string, tag?: string): Promise<ContactRecord[]> {
     const res = await this.pool.query(
-      `SELECT id::text, organization_id::text, email::text, first_name, last_name, tags,
-              consent_source, consented_at, unsubscribed_at
+      `SELECT id::text, organization_id::text, email::text, first_name, last_name, status,
+              tags, attributes, consent_source, consented_at, unsubscribed_at,
+              last_activity_at, engagement_score, created_at
          FROM contacts
         WHERE organization_id = $1
           AND ($2::text IS NULL OR $2 = ANY(tags))
@@ -1614,10 +1615,15 @@ export class PgMarketingStore implements MarketingStore {
       email: r.email,
       firstName: r.first_name ?? '',
       lastName: r.last_name ?? '',
+      status: r.status ?? (r.unsubscribed_at ? 'unsubscribed' : 'subscribed'),
       tags: r.tags ?? [],
+      attributes: r.attributes ?? {},
       consentSource: r.consent_source,
       consentedAt: iso(r.consented_at),
       unsubscribedAt: isoOrNull(r.unsubscribed_at),
+      lastActivityAt: isoOrNull(r.last_activity_at),
+      engagementScore: Number(r.engagement_score ?? 0),
+      createdAt: iso(r.created_at),
     }));
   }
 
@@ -2002,8 +2008,13 @@ export class PgAnalyticsStore implements AnalyticsStore {
       return { start: new Date(startOfToday.getTime() - 86_400_000), end: startOfToday };
     }
     if (range === '7d') return { start: new Date(now.getTime() - 7 * 86_400_000), end: now };
-    if (range === 'custom' && from && to) {
-      return { start: new Date(from), end: new Date(to) };
+    if (range === 'custom') {
+      const startMs = from ? Date.parse(from) : NaN;
+      const endMs = to ? Date.parse(to) : NaN;
+      if (Number.isNaN(startMs) || Number.isNaN(endMs) || startMs > endMs) {
+        throw new AppError(400, 'INVALID_DATE_RANGE', 'Custom date range requires valid from and to ISO timestamps');
+      }
+      return { start: new Date(startMs), end: new Date(endMs) };
     }
     return { start: new Date(now.getTime() - 30 * 86_400_000), end: now };
   }
@@ -2016,6 +2027,8 @@ export class PgAnalyticsStore implements AnalyticsStore {
     domain: string;
     latencyMs?: number;
     campaignId?: string | null;
+    domainId?: string | null;
+    messageRecipientId?: string | null;
     detail?: string | null;
     createdAt?: string;
   }): Promise<EmailEventRecord> {
@@ -2023,16 +2036,24 @@ export class PgAnalyticsStore implements AnalyticsStore {
     const createdAt = input.createdAt ?? new Date().toISOString();
     const uuidRx = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const dbMessageId = uuidRx.test(input.messageId) ? input.messageId : uuidv7();
+    const dbCampaignId = input.campaignId && uuidRx.test(input.campaignId) ? input.campaignId : null;
+    const dbDomainId = input.domainId && uuidRx.test(input.domainId) ? input.domainId : null;
+    const dbRcptId = input.messageRecipientId && uuidRx.test(input.messageRecipientId) ? input.messageRecipientId : null;
+    const lowerEmail = input.recipientEmail.toLowerCase();
+
     await this.pool.query(
-      `INSERT INTO email_events (id, organization_id, message_id, event_type, metadata, occurred_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO email_events (id, organization_id, domain_id, campaign_id, message_id, message_recipient_id, event_type, metadata, occurred_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         id,
         input.organizationId,
+        dbDomainId,
+        dbCampaignId,
         dbMessageId,
+        dbRcptId,
         input.eventType,
         JSON.stringify({
-          recipientEmail: input.recipientEmail.toLowerCase(),
+          recipientEmail: lowerEmail,
           domain: input.domain.toLowerCase(),
           latencyMs: input.latencyMs ?? 0,
           campaignId: input.campaignId ?? null,
@@ -2041,11 +2062,26 @@ export class PgAnalyticsStore implements AnalyticsStore {
         createdAt,
       ]
     );
+
+    if (input.eventType === 'opened' || input.eventType === 'clicked') {
+      const scoreBump = input.eventType === 'clicked' ? 3 : 1;
+      await this.pool
+        .query(
+          `UPDATE contacts
+              SET last_activity_at = GREATEST(COALESCE(last_activity_at, '1970-01-01'::timestamptz), $3::timestamptz),
+                  engagement_score = engagement_score + $4,
+                  updated_at = NOW()
+            WHERE organization_id = $1 AND LOWER(email::text) = $2`,
+          [input.organizationId, lowerEmail, createdAt, scoreBump]
+        )
+        .catch(() => undefined);
+    }
+
     return {
       id,
       organizationId: input.organizationId,
       messageId: input.messageId,
-      recipientEmail: input.recipientEmail.toLowerCase(),
+      recipientEmail: lowerEmail,
       eventType: input.eventType,
       domain: input.domain.toLowerCase(),
       latencyMs: input.latencyMs ?? 0,
@@ -2061,36 +2097,51 @@ export class PgAnalyticsStore implements AnalyticsStore {
     recipientEmail: string;
     kind: 'open' | 'click' | 'unsubscribe';
     targetUrl?: string | null;
+    campaignId?: string | null;
+    domainId?: string | null;
+    subscriberId?: string | null;
   }): Promise<TrackingTokenRecord> {
+    const uuidRx = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const safeMessageId = uuidRx.test(input.messageId) ? input.messageId : uuidv7();
+    const safeCampaignId = input.campaignId && uuidRx.test(input.campaignId) ? input.campaignId : null;
+    const safeDomainId = input.domainId && uuidRx.test(input.domainId) ? input.domainId : null;
+    const safeSubId = input.subscriberId && uuidRx.test(input.subscriberId) ? input.subscriberId : null;
     const token = randomBytes(18).toString('base64url');
     const createdAt = new Date().toISOString();
     await this.pool.query(
-      `INSERT INTO tracking_tokens (token, organization_id, message_id, recipient_email, kind, target_url, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO tracking_tokens (token, organization_id, message_id, recipient_email, kind, target_url, campaign_id, domain_id, subscriber_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         token,
         input.organizationId,
-        input.messageId,
+        safeMessageId,
         input.recipientEmail.toLowerCase(),
         input.kind,
         input.targetUrl ?? null,
+        safeCampaignId,
+        safeDomainId,
+        safeSubId,
         createdAt,
       ]
     );
     return {
       token,
       organizationId: input.organizationId,
-      messageId: input.messageId,
+      messageId: safeMessageId,
       recipientEmail: input.recipientEmail.toLowerCase(),
       kind: input.kind,
       targetUrl: input.targetUrl ?? null,
+      campaignId: safeCampaignId,
+      domainId: safeDomainId,
+      subscriberId: safeSubId,
       createdAt,
     };
   }
 
   async getTrackingToken(token: string): Promise<TrackingTokenRecord | null> {
     const res = await this.pool.query(
-      `SELECT token, organization_id::text, message_id::text, recipient_email::text, kind, target_url, created_at
+      `SELECT token, organization_id::text, message_id::text, recipient_email::text, kind, target_url,
+              campaign_id::text, domain_id::text, subscriber_id::text, created_at
          FROM tracking_tokens WHERE token = $1 LIMIT 1`,
       [token]
     );
@@ -2103,6 +2154,9 @@ export class PgAnalyticsStore implements AnalyticsStore {
       recipientEmail: r.recipient_email,
       kind: r.kind,
       targetUrl: r.target_url ?? null,
+      campaignId: r.campaign_id ?? null,
+      domainId: r.domain_id ?? null,
+      subscriberId: r.subscriber_id ?? null,
       createdAt: iso(r.created_at),
     };
   }
@@ -2157,7 +2211,39 @@ export class PgAnalyticsStore implements AnalyticsStore {
   }
 
   async getOverview(orgId: string, opts: { range: DateRangePreset; from?: string; to?: string }) {
-    const filtered = await this.queryEvents(orgId, opts);
+    const { start, end } = this.resolveSqlWindow(opts.range, opts.from, opts.to);
+    const [aggRes, seriesRes] = await Promise.all([
+      this.pool.query<{ event_type: EmailEventType; cnt: number; latency_sum: string | null; latency_cnt: string }>(
+        `SELECT event_type, COUNT(*)::int AS cnt,
+                SUM(GREATEST(COALESCE((metadata->>'latencyMs')::numeric, (metadata->>'durationMs')::numeric, 0), 0))::text AS latency_sum,
+                COUNT(*) FILTER (WHERE COALESCE((metadata->>'latencyMs')::numeric, (metadata->>'durationMs')::numeric, 0) > 0)::text AS latency_cnt
+           FROM email_events
+          WHERE organization_id = $1 AND occurred_at >= $2 AND occurred_at <= $3
+          GROUP BY event_type`,
+        [orgId, start, end]
+      ),
+      this.pool.query<{
+        day: string;
+        accepted: number;
+        delivered: number;
+        bounced: number;
+        opened: number;
+        clicked: number;
+      }>(
+        `SELECT to_char(date_trunc('day', occurred_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+                COUNT(*) FILTER (WHERE event_type = 'accepted')::int AS accepted,
+                COUNT(*) FILTER (WHERE event_type = 'delivered')::int AS delivered,
+                COUNT(*) FILTER (WHERE event_type = 'bounced')::int AS bounced,
+                COUNT(*) FILTER (WHERE event_type = 'opened')::int AS opened,
+                COUNT(*) FILTER (WHERE event_type = 'clicked')::int AS clicked
+           FROM email_events
+          WHERE organization_id = $1 AND occurred_at >= $2 AND occurred_at <= $3
+          GROUP BY 1
+          ORDER BY 1 ASC`,
+        [orgId, start, end]
+      ),
+    ]);
+
     const counts: Record<EmailEventType, number> = {
       accepted: 0,
       delivered: 0,
@@ -2169,39 +2255,15 @@ export class PgAnalyticsStore implements AnalyticsStore {
       opened: 0,
       clicked: 0,
     };
-    const byDay = new Map<
-      string,
-      { date: string; accepted: number; delivered: number; bounced: number; opened: number; clicked: number }
-    >();
+    let totalEvents = 0;
     let latencyTotal = 0;
     let latencyCount = 0;
 
-    for (const ev of filtered) {
-      counts[ev.eventType] = (counts[ev.eventType] ?? 0) + 1;
-      if (ev.latencyMs > 0) {
-        latencyTotal += ev.latencyMs;
-        latencyCount += 1;
-      }
-
-      const dayKey = ev.createdAt.slice(0, 10);
-      const bucket = byDay.get(dayKey) ?? {
-        date: dayKey,
-        accepted: 0,
-        delivered: 0,
-        bounced: 0,
-        opened: 0,
-        clicked: 0,
-      };
-      if (
-        ev.eventType === 'accepted' ||
-        ev.eventType === 'delivered' ||
-        ev.eventType === 'bounced' ||
-        ev.eventType === 'opened' ||
-        ev.eventType === 'clicked'
-      ) {
-        bucket[ev.eventType] += 1;
-      }
-      byDay.set(dayKey, bucket);
+    for (const r of aggRes.rows) {
+      counts[r.event_type] = Number(r.cnt ?? 0);
+      totalEvents += Number(r.cnt ?? 0);
+      latencyTotal += Number(r.latency_sum ?? 0);
+      latencyCount += Number(r.latency_cnt ?? 0);
     }
 
     const baseVolume = Math.max(counts.accepted, counts.delivered + counts.bounced + counts.deferred, 0);
@@ -2210,11 +2272,10 @@ export class PgAnalyticsStore implements AnalyticsStore {
     const openRate = counts.delivered > 0 ? Number(((counts.opened / counts.delivered) * 100).toFixed(2)) : 0;
     const clickRate = counts.delivered > 0 ? Number(((counts.clicked / counts.delivered) * 100).toFixed(2)) : 0;
     const avgLatencyMs = latencyCount > 0 ? Math.round(latencyTotal / latencyCount) : 0;
-    const series = [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
 
     return {
       range: opts.range,
-      totalEvents: filtered.length,
+      totalEvents,
       counts,
       rates: {
         deliveryRate,
@@ -2223,7 +2284,14 @@ export class PgAnalyticsStore implements AnalyticsStore {
         clickRate,
       },
       avgLatencyMs,
-      series,
+      series: seriesRes.rows.map((r) => ({
+        date: r.day,
+        accepted: Number(r.accepted ?? 0),
+        delivered: Number(r.delivered ?? 0),
+        bounced: Number(r.bounced ?? 0),
+        opened: Number(r.opened ?? 0),
+        clicked: Number(r.clicked ?? 0),
+      })),
     };
   }
 
@@ -2231,19 +2299,42 @@ export class PgAnalyticsStore implements AnalyticsStore {
     orgId: string,
     opts: { range: DateRangePreset; from?: string; to?: string; eventType?: EmailEventType; recipient?: string }
   ): Promise<string> {
-    const rows = await this.queryEvents(orgId, opts);
+    const safeCell = (val: string) => {
+      const escaped = /^[=+\-@]/.test(val) ? `'${val}` : val;
+      return /[",\n\r]/.test(escaped) ? `"${escaped.replaceAll('"', '""')}"` : escaped;
+    };
+    const { start, end } = this.resolveSqlWindow(opts.range, opts.from, opts.to);
+    const res = await this.pool.query(
+      `SELECT e.id::text, e.occurred_at, e.event_type, e.message_id::text, e.metadata,
+              r.recipient_email::text AS rcpt_email
+         FROM email_events e
+         LEFT JOIN message_recipients r ON r.id = e.message_recipient_id
+        WHERE e.organization_id = $1
+          AND e.occurred_at >= $2
+          AND e.occurred_at <= $3
+          AND ($4::text IS NULL OR e.event_type = $4)
+          AND ($5::text IS NULL OR LOWER(COALESCE(r.recipient_email::text, e.metadata->>'recipientEmail', '')) LIKE $5)
+        ORDER BY e.occurred_at DESC
+        LIMIT 25000`,
+      [orgId, start, end, opts.eventType ?? null, opts.recipient ? `%${opts.recipient.toLowerCase()}%` : null]
+    );
     const lines = ['id,createdAt,eventType,recipientEmail,domain,messageId,latencyMs,detail'];
-    for (const r of rows) {
+    for (const r of res.rows) {
+      const m = (r.metadata ?? {}) as Record<string, unknown>;
+      const email = (r.rcpt_email as string | null) ?? String(m.recipientEmail ?? 'unknown');
+      const domain = String(m.domain ?? email.split('@')[1] ?? 'unknown');
+      const latency = Number(m.latencyMs ?? m.durationMs ?? 0);
+      const detail = m.detail ? String(m.detail) : '';
       lines.push(
         [
-          r.id,
-          r.createdAt,
-          r.eventType,
-          r.recipientEmail,
-          r.domain,
-          r.messageId,
-          String(r.latencyMs),
-          JSON.stringify(r.detail ?? ''),
+          safeCell(String(r.id)),
+          safeCell(iso(r.occurred_at)),
+          safeCell(String(r.event_type)),
+          safeCell(email),
+          safeCell(domain),
+          safeCell(String(r.message_id)),
+          safeCell(String(latency)),
+          safeCell(detail),
         ].join(',')
       );
     }

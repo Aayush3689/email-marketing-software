@@ -156,10 +156,16 @@ async function sweepDueDeferredRetries(): Promise<number> {
         'utf8'
       );
       await new Promise<void>((resolve, reject) => {
-        confirmChannel.publish('mail.retry', 'retry', payload, { persistent: true }, (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
+        confirmChannel.publish(
+          'mail.events',
+          'mail.outbound.retry',
+          payload,
+          { persistent: true, contentType: 'application/json' },
+          (err) => {
+            if (err) reject(err);
+            else resolve();
+          }
+        );
       });
       requeued += 1;
     }

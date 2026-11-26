@@ -120,3 +120,63 @@ export const deleteDomainSchema = z.object({
   confirmDomainName: z.string().trim().toLowerCase().min(3).max(253),
   confirmCleanup: z.boolean().default(false),
 });
+
+export const createTagSchema = z.object({
+  name: z.string().trim().min(1).max(64),
+  description: z.string().trim().max(300).default(''),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).default('#2563eb'),
+});
+
+export const createCustomFieldSchema = z.object({
+  fieldKey: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z][a-z0-9_]*$/, 'Field key must start with a letter and use lowercase letters, numbers, or underscores'),
+  label: z.string().trim().min(1).max(80),
+  fieldType: z.enum(['text', 'number', 'date', 'boolean']).default('text'),
+  description: z.string().trim().max(300).default(''),
+});
+
+export const segmentConditionSchema: z.ZodType<Record<string, unknown>> = z.lazy(() =>
+  z.object({
+    id: z.string().min(1).max(64),
+    kind: z.enum(['rule', 'group']),
+    field: z.string().optional(),
+    operator: z.string().optional(),
+    value: z.union([z.string(), z.number(), z.array(z.string())]).optional(),
+    matchType: z.enum(['all', 'any']).optional(),
+    rules: z.array(segmentConditionSchema).optional(),
+  })
+);
+
+export const saveSegmentSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(300).default(''),
+  matchType: z.enum(['all', 'any']).default('all'),
+  conditions: z.array(segmentConditionSchema).max(50).default([]),
+});
+
+export const upsertSubscriberSchema = z.object({
+  email: emailAddressSchema,
+  firstName: z.string().trim().max(120).default(''),
+  lastName: z.string().trim().max(120).default(''),
+  status: z.enum(['subscribed', 'unsubscribed', 'pending_confirmation']).default('subscribed'),
+  tags: z.array(z.string().trim().min(1).max(64)).max(50).default([]),
+  attributes: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).default({}),
+  consentSource: z.string().trim().min(2).max(200),
+  consentedAt: z.string().datetime().optional(),
+});
+
+export const audienceSelectionSchema = z.object({
+  mode: z.enum(['all', 'filtered']).default('all'),
+  includeTagIds: z.array(z.string()).default([]),
+  includeTags: z.array(z.string()).default([]),
+  includeSegmentIds: z.array(z.string()).default([]),
+  subscriberIds: z.array(z.string()).default([]),
+  excludeTagIds: z.array(z.string()).default([]),
+  excludeTags: z.array(z.string()).default([]),
+  excludeSegmentIds: z.array(z.string()).default([]),
+});

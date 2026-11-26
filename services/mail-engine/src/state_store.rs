@@ -116,16 +116,26 @@ async fn persist_pg_attempt(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
 
-    let rcpt_meta =
-        sqlx::query(r"SELECT organization_id FROM message_recipients WHERE id = $1 LIMIT 1")
-            .bind(recipient_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let rcpt_meta = sqlx::query(
+        r"SELECT r.organization_id, r.recipient_email::text AS recipient_email,
+                 m.domain_id, m.campaign_id, split_part(m.header_from::text, '@', 2) AS sender_domain
+            FROM message_recipients r
+            JOIN messages m ON m.id = r.message_id
+           WHERE r.id = $1
+           LIMIT 1",
+    )
+    .bind(recipient_id)
+    .fetch_optional(&mut *tx)
+    .await?;
 
     let Some(row) = rcpt_meta else {
         anyhow::bail!("missing message_recipient row {recipient_id} when persisting attempt");
     };
     let organization_id: Uuid = row.try_get("organization_id")?;
+    let recipient_email: String = row.try_get("recipient_email").unwrap_or_default();
+    let domain_id: Option<Uuid> = row.try_get("domain_id").ok().flatten();
+    let campaign_id: Option<Uuid> = row.try_get("campaign_id").ok().flatten();
+    let sender_domain: String = row.try_get("sender_domain").unwrap_or_default();
 
     let (recipient_state, attempt_outcome) = match record.next_state {
         RecipientDeliveryState::AcceptedRemote => ("accepted_remote", "accepted"),
@@ -193,31 +203,104 @@ async fn persist_pg_attempt(
     .execute(&mut *tx)
     .await?;
 
+    record_attempt_outcome(
+        &mut tx,
+        organization_id,
+        domain_id,
+        campaign_id,
+        message_id,
+        recipient_id,
+        &recipient_email,
+        &sender_domain,
+        record,
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_attempt_outcome(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    domain_id: Option<Uuid>,
+    campaign_id: Option<Uuid>,
+    message_id: Uuid,
+    recipient_id: Uuid,
+    recipient_email: &str,
+    sender_domain: &str,
+    record: &AttemptRecord,
+) -> Result<()> {
     let event_type = match record.next_state {
         RecipientDeliveryState::AcceptedRemote => "delivered",
         RecipientDeliveryState::Deferred => "deferred",
         RecipientDeliveryState::Bounced => "bounced",
     };
     sqlx::query(
-        r"INSERT INTO email_events (id, organization_id, message_id, message_recipient_id, event_type, metadata)
-          VALUES ($1, $2, $3, $4, $5, $6)",
+        r"INSERT INTO email_events (id, organization_id, domain_id, campaign_id, message_id, message_recipient_id, event_type, metadata)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(Uuid::now_v7())
     .bind(organization_id)
+    .bind(domain_id)
+    .bind(campaign_id)
     .bind(message_id)
     .bind(recipient_id)
     .bind(event_type)
     .bind(serde_json::json!({
+        "recipientEmail": recipient_email,
+        "domain": sender_domain,
         "smtpCode": record.smtp_code,
         "enhancedCode": record.enhanced_code,
         "remoteMxHost": record.remote_mx_host,
         "durationMs": record.duration_ms,
     }))
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
+    if record.next_state == RecipientDeliveryState::Bounced && !recipient_email.is_empty() {
+        record_bounce_suppression(
+            tx,
+            organization_id,
+            recipient_email,
+            message_id,
+            campaign_id,
+        )
+        .await;
+    }
     Ok(())
+}
+
+async fn record_bounce_suppression(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    recipient_email: &str,
+    message_id: Uuid,
+    campaign_id: Option<Uuid>,
+) {
+    let lower_rcpt = recipient_email.to_ascii_lowercase();
+    let _ = sqlx::query(
+        r"INSERT INTO suppression_entries (id, organization_id, email, reason, source_message_id, source, related_campaign_id)
+          VALUES ($1, $2, $3, 'hard_bounce', $4, 'smtp_bounce', $5)
+          ON CONFLICT DO NOTHING",
+    )
+    .bind(Uuid::now_v7())
+    .bind(organization_id)
+    .bind(&lower_rcpt)
+    .bind(message_id)
+    .bind(campaign_id)
+    .execute(&mut **tx)
+    .await;
+
+    let _ = sqlx::query(
+        r"UPDATE contacts SET status = 'bounced', updated_at = NOW()
+           WHERE organization_id = $1 AND email = $2",
+    )
+    .bind(organization_id)
+    .bind(&lower_rcpt)
+    .execute(&mut **tx)
+    .await;
 }
 
 /// PostgreSQL-backed [`CredentialStore`] querying `smtp_credentials`, with optional seeded fallback.
@@ -512,57 +595,91 @@ impl FeedbackStore for PgFeedbackStore {
             return Ok(());
         };
 
-        let (rcpt_id_opt, email_opt, reason) = match &feedback {
-            FeedbackClassification::HardBounce {
-                recipient_id,
-                bounced_email,
-                ..
-            } => (
-                recipient_id.as_deref(),
-                bounced_email.as_deref(),
-                "hard_bounce",
-            ),
-            FeedbackClassification::Complaint {
-                recipient_id,
-                complained_email,
-                ..
-            } => (
-                recipient_id.as_deref(),
-                complained_email.as_deref(),
-                "complaint",
-            ),
-            FeedbackClassification::SoftBounce { .. } | FeedbackClassification::Unclassified => {
-                return Ok(());
-            }
-        };
-
-        if let Some(rcpt_uuid) = rcpt_id_opt.and_then(|s| Uuid::parse_str(s).ok()) {
-            if let Ok(Some(row)) = sqlx::query(
-                r"SELECT organization_id, recipient_email::text AS email FROM message_recipients WHERE id = $1",
-            )
-            .bind(rcpt_uuid)
-            .fetch_optional(pool)
-            .await
-            {
-                let org_id: Uuid = row.try_get("organization_id")?;
-                let rcpt_email: String = row.try_get("email")?;
-                let target_email = email_opt.unwrap_or(&rcpt_email).to_ascii_lowercase();
-
-                if reason == "hard_bounce" {
-                    let _ = sqlx::query("UPDATE message_recipients SET state = 'bounced' WHERE id = $1")
-                        .bind(rcpt_uuid)
-                        .execute(pool)
-                        .await;
+        let (rcpt_id_opt, email_opt, orig_msg_id_opt, reason, event_type, contact_status) =
+            match &feedback {
+                FeedbackClassification::HardBounce {
+                    recipient_id,
+                    bounced_email,
+                    ..
+                } => (
+                    recipient_id.as_deref(),
+                    bounced_email.as_deref(),
+                    None::<&str>,
+                    "hard_bounce",
+                    "bounced",
+                    "bounced",
+                ),
+                FeedbackClassification::Complaint {
+                    recipient_id,
+                    complained_email,
+                    original_message_id,
+                    ..
+                } => (
+                    recipient_id.as_deref(),
+                    complained_email.as_deref(),
+                    original_message_id.as_deref(),
+                    "complaint",
+                    "complained",
+                    "complained",
+                ),
+                FeedbackClassification::SoftBounce { .. }
+                | FeedbackClassification::Unclassified => {
+                    return Ok(());
                 }
+            };
+
+        let resolved = resolve_feedback_target(pool, rcpt_id_opt, email_opt, orig_msg_id_opt).await;
+
+        if let (Some(org_id), Some(target_email)) = (resolved.org_id, resolved.email) {
+            if reason == "hard_bounce" {
+                if let Some(rcpt_uuid) = resolved.rcpt_id {
+                    let _ = sqlx::query(
+                        "UPDATE message_recipients SET state = 'bounced' WHERE id = $1",
+                    )
+                    .bind(rcpt_uuid)
+                    .execute(pool)
+                    .await;
+                }
+            }
+            let _ = sqlx::query(
+                r"INSERT INTO suppression_entries (id, organization_id, email, reason, source_message_id, source, related_campaign_id)
+                  VALUES ($1, $2, $3, $4, $5, 'inbound_feedback', $6)
+                  ON CONFLICT DO NOTHING",
+            )
+            .bind(Uuid::now_v7())
+            .bind(org_id)
+            .bind(&target_email)
+            .bind(reason)
+            .bind(resolved.msg_id)
+            .bind(resolved.campaign_id)
+            .execute(pool)
+            .await;
+
+            let _ = sqlx::query(
+                r"UPDATE contacts SET status = $3, updated_at = NOW() WHERE organization_id = $1 AND email = $2",
+            )
+            .bind(org_id)
+            .bind(&target_email)
+            .bind(contact_status)
+            .execute(pool)
+            .await;
+
+            if let Some(msg_id) = resolved.msg_id {
                 let _ = sqlx::query(
-                    r"INSERT INTO suppression_entries (id, organization_id, email, reason)
-                      VALUES ($1, $2, $3, $4)
-                      ON CONFLICT DO NOTHING",
+                    r"INSERT INTO email_events (id, organization_id, domain_id, campaign_id, message_id, message_recipient_id, event_type, metadata)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind(Uuid::now_v7())
                 .bind(org_id)
-                .bind(&target_email)
-                .bind(reason)
+                .bind(resolved.domain_id)
+                .bind(resolved.campaign_id)
+                .bind(msg_id)
+                .bind(resolved.rcpt_id)
+                .bind(event_type)
+                .bind(serde_json::json!({
+                    "recipientEmail": target_email,
+                    "detail": reason,
+                }))
                 .execute(pool)
                 .await;
             }
@@ -570,6 +687,76 @@ impl FeedbackStore for PgFeedbackStore {
 
         Ok(())
     }
+}
+
+#[derive(Default)]
+struct ResolvedFeedbackTarget {
+    org_id: Option<Uuid>,
+    msg_id: Option<Uuid>,
+    domain_id: Option<Uuid>,
+    campaign_id: Option<Uuid>,
+    rcpt_id: Option<Uuid>,
+    email: Option<String>,
+}
+
+async fn resolve_feedback_target(
+    pool: &PgPool,
+    rcpt_id_opt: Option<&str>,
+    email_opt: Option<&str>,
+    orig_msg_id_opt: Option<&str>,
+) -> ResolvedFeedbackTarget {
+    let mut out = ResolvedFeedbackTarget {
+        email: email_opt.map(str::to_ascii_lowercase),
+        ..Default::default()
+    };
+    if let Some(rcpt_uuid) = rcpt_id_opt.and_then(|s| Uuid::parse_str(s).ok()) {
+        if let Ok(Some(row)) = sqlx::query(
+            r"SELECT r.organization_id, r.message_id, m.domain_id, m.campaign_id, r.recipient_email::text AS email
+                FROM message_recipients r
+                JOIN messages m ON m.id = r.message_id
+               WHERE r.id = $1",
+        )
+        .bind(rcpt_uuid)
+        .fetch_optional(pool)
+        .await
+        {
+            out.rcpt_id = Some(rcpt_uuid);
+            out.org_id = row.try_get("organization_id").ok();
+            out.msg_id = row.try_get("message_id").ok();
+            out.domain_id = row.try_get("domain_id").ok().flatten();
+            out.campaign_id = row.try_get("campaign_id").ok().flatten();
+            if out.email.is_none() {
+                out.email = row.try_get::<String, _>("email").ok().map(|s| s.to_ascii_lowercase());
+            }
+        }
+    } else if let Some(msg_hdr) = orig_msg_id_opt {
+        if let Ok(Some(row)) = sqlx::query(
+            r"SELECT id, organization_id, domain_id, campaign_id FROM messages WHERE message_id_header = $1 LIMIT 1",
+        )
+        .bind(msg_hdr)
+        .fetch_optional(pool)
+        .await
+        {
+            out.msg_id = row.try_get("id").ok();
+            out.org_id = row.try_get("organization_id").ok();
+            out.domain_id = row.try_get("domain_id").ok().flatten();
+            out.campaign_id = row.try_get("campaign_id").ok().flatten();
+        }
+    }
+    if out.org_id.is_none() {
+        if let Some(ref target) = out.email {
+            if let Ok(Some(row)) = sqlx::query(
+                r"SELECT organization_id FROM contacts WHERE email = $1 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(target)
+            .fetch_optional(pool)
+            .await
+            {
+                out.org_id = row.try_get("organization_id").ok();
+            }
+        }
+    }
+    out
 }
 
 /// Reloads all active DKIM keys from PostgreSQL into `keyring` atomically.

@@ -23,13 +23,13 @@ import { LocalSpoolWriter, PgEmailSubmissionStore, S3SpoolWriter } from './route
 import { InMemoryMailboxStore } from './routes/mailboxes.js';
 import type { ReadinessDeps } from './routes/health.js';
 import { InMemoryWebhookStore } from './routes/webhooks.js';
+import { PgMarketingPlatformStore, runMarketingBackgroundTick } from './stores/pg-marketing-platform-store.js';
 import {
   PgAnalyticsStore,
   PgAuthStore,
   PgCredentialsStore,
   PgDomainStore,
   PgMailboxStore,
-  PgMarketingStore,
   PgWebhookStore,
 } from './stores/pg-stores.js';
 
@@ -44,7 +44,7 @@ const mailboxStore = useInMemory ? new InMemoryMailboxStore() : new PgMailboxSto
 const credentialsStore = useInMemory
   ? new InMemoryCredentialsStore()
   : new PgCredentialsStore(pgPool);
-const marketingStore = useInMemory ? new InMemoryMarketingStore() : new PgMarketingStore(pgPool);
+const marketingStore = useInMemory ? new InMemoryMarketingStore() : new PgMarketingPlatformStore(pgPool);
 const webhookStore = useInMemory
   ? new InMemoryWebhookStore()
   : new PgWebhookStore(pgPool, process.env.KEY_ENCRYPTION_SECRET ?? config.JWT_ACCESS_SECRET);
@@ -251,8 +251,123 @@ const dnsAutoTimer = setInterval(() => {
 }, 120_000);
 dnsAutoTimer.unref();
 
+const marketingAutoTimer = setInterval(() => {
+  if (useInMemory || !(marketingStore instanceof PgMarketingPlatformStore)) return;
+  void runMarketingBackgroundTick({
+    pool: pgPool,
+    marketingStore,
+    dispatchCampaign: async (campaign) => {
+      const emailStore = new PgEmailSubmissionStore(pgPool);
+      const spool =
+        config.SPOOL_BACKEND === 's3' && config.S3_ENDPOINT
+          ? new S3SpoolWriter({
+              endpoint: config.S3_ENDPOINT,
+              region: config.S3_REGION,
+              bucket: config.S3_BUCKET,
+              accessKey: config.S3_ACCESS_KEY ?? '',
+              secretKey: config.S3_SECRET_KEY ?? '',
+            })
+          : new LocalSpoolWriter(config.SPOOL_DIR);
+      const dom = await domainStore.getDomain(campaign.organizationId, campaign.domainId);
+      if (!dom || !dom.ownershipVerifiedAt || !dom.sendingEnabled || dom.isSuspended) return 0;
+      const { eligible } = await marketingStore.estimateBroadcastAudience(
+        campaign.organizationId,
+        campaign.audienceSpec ?? { mode: 'all' }
+      );
+      await marketingStore.snapshotCampaignRecipients(campaign.organizationId, campaign.id, eligible);
+      const fromAddr = campaign.fromEmail || `${dom.defaultSenderLocalPart || 'newsletter'}@${dom.domainName}`;
+      const { buildBasicRfc5322Mime } = await import('./routes/emails.js');
+      const { instrumentTrackedEmail, renderPersonalizedContent, buildSubscriberVarMap, htmlToPlainText } = await import('./services/marketing-engine.js');
+      const { uuidv7 } = await import('./utils/uuidv7.js');
+      const baseUrl = process.env.PUBLIC_BASE_URL || (config.PRIMARY_DOMAIN ? `https://${config.PRIMARY_DOMAIN}` : 'http://localhost:4000');
+      let sent = 0;
+      for (const c of eligible) {
+        const vars = buildSubscriberVarMap(c);
+        const subj = renderPersonalizedContent(campaign.subject || campaign.name, vars);
+        const htmlRaw = renderPersonalizedContent(campaign.htmlBody || '', vars);
+        const textRaw = renderPersonalizedContent(campaign.textBody || htmlToPlainText(htmlRaw), vars);
+        const recipientId = uuidv7();
+        const tracked = await instrumentTrackedEmail({
+          baseUrl,
+          organizationId: campaign.organizationId,
+          messageId: uuidv7(),
+          recipientEmail: c.email,
+          campaignId: campaign.id,
+          domainId: dom.id,
+          subscriberId: c.id,
+          htmlBody: htmlRaw,
+          textBody: textRaw,
+          createTrackingToken: async (t) => analyticsStore.createTrackingToken(t),
+        });
+        const envFrom = dom.customReturnPathDomain ? `bounces+${recipientId}@${dom.customReturnPathDomain}` : fromAddr;
+        const mime = buildBasicRfc5322Mime({
+          from: campaign.fromName ? `${campaign.fromName} <${fromAddr}>` : fromAddr,
+          to: [c.email],
+          subject: subj,
+          html: tracked.html,
+          text: tracked.text,
+          headers: tracked.headers,
+        });
+        const sp = await spool.writeMime(campaign.organizationId, mime);
+        const res = await emailStore.submitTransactionalEmail({
+          organizationId: campaign.organizationId,
+          domainId: dom.id,
+          from: fromAddr,
+          envelopeFrom: envFrom,
+          recipients: [c.email],
+          subject: subj,
+          bodyStorageKey: sp.storageKey,
+          sizeBytes: sp.sizeBytes,
+          sourceType: 'campaign',
+          campaignId: campaign.id,
+          recipientId,
+          routingKey: 'mail.outbound.bulk',
+        });
+        await marketingStore.markCampaignRecipientStatus(campaign.id, c.email, 'queued', res.messageId);
+        sent += 1;
+      }
+      return sent;
+    },
+    sendSequenceStepEmail: async (step) => {
+      const dom = await domainStore.getDomain(step.organizationId, step.domainId);
+      if (!dom || !dom.ownershipVerifiedAt || !dom.sendingEnabled || dom.isSuspended) return;
+      const emailStore = new PgEmailSubmissionStore(pgPool);
+      const spool = new LocalSpoolWriter(config.SPOOL_DIR);
+      const { buildBasicRfc5322Mime } = await import('./routes/emails.js');
+      const { uuidv7 } = await import('./utils/uuidv7.js');
+      const fromAddr = step.fromEmail || `${dom.defaultSenderLocalPart || 'newsletter'}@${dom.domainName}`;
+      const rcptId = uuidv7();
+      const envFrom = dom.customReturnPathDomain ? `bounces+${rcptId}@${dom.customReturnPathDomain}` : fromAddr;
+      const mime = buildBasicRfc5322Mime({
+        from: step.fromName ? `${step.fromName} <${fromAddr}>` : fromAddr,
+        to: [step.recipientEmail],
+        subject: step.subject,
+        html: step.htmlBody,
+        text: step.textBody,
+        headers: step.replyTo ? { 'Reply-To': step.replyTo } : {},
+      });
+      const sp = await spool.writeMime(step.organizationId, mime);
+      await emailStore.submitTransactionalEmail({
+        organizationId: step.organizationId,
+        domainId: dom.id,
+        from: fromAddr,
+        envelopeFrom: envFrom,
+        recipients: [step.recipientEmail],
+        subject: step.subject,
+        bodyStorageKey: sp.storageKey,
+        sizeBytes: sp.sizeBytes,
+        sourceType: 'campaign',
+        recipientId: rcptId,
+        routingKey: 'mail.outbound.bulk',
+      });
+    },
+  }).catch(() => undefined);
+}, 20_000);
+marketingAutoTimer.unref();
+
 async function shutdown(signal: string): Promise<void> {
   clearInterval(dnsAutoTimer);
+  clearInterval(marketingAutoTimer);
   logger.info('Shutting down API server', { signal });
   server.close(async () => {
     await pgPool.end();
