@@ -17,7 +17,7 @@ impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
             base_delay: Duration::from_secs(30),
-            max_delay: Duration::from_hours(4),
+            max_delay: Duration::from_secs(4 * 3600),
             ambiguous_min_delay: Duration::from_secs(300),
             max_attempts: 12,
         }
