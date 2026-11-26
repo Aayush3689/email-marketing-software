@@ -14,6 +14,7 @@ export function CampaignsView() {
   const [consentSource, setConsentSource] = useState('product_signup_form');
   const [contactInput, setContactInput] = useState('alice@example.com, Alice, newsletter');
   const [campName, setCampName] = useState('');
+  const [selectedDomainId, setSelectedDomainId] = useState('');
   const [selectedTplId, setSelectedTplId] = useState('');
   const [tagFilter, setTagFilter] = useState('');
 
@@ -44,14 +45,6 @@ export function CampaignsView() {
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Template creation failed'),
   });
 
-  const duplicateTemplate = useMutation({
-    mutationFn: (id: string) => api.duplicateTemplate(id),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['templates'] });
-      toast.success('Template duplicated');
-    },
-  });
-
   const runPreview = useMutation({
     mutationFn: () =>
       api.previewTemplate({
@@ -60,23 +53,35 @@ export function CampaignsView() {
         variables: { firstName: 'Alice' },
       }),
     onSuccess: (res) => setPreviewOut(res),
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Preview failed'),
+  });
+
+  const duplicateTemplate = useMutation({
+    mutationFn: (id: string) => api.duplicateTemplate(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['templates'] });
+      toast.success('Template duplicated');
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Duplicate failed'),
   });
 
   const importContacts = useMutation({
     mutationFn: () => {
       const rows = contactInput
-        .split('\n')
+        .split(/\r?\n/)
         .map((line) => line.trim())
         .filter(Boolean)
-        .map((line) => {
-          const parts = line.split(',').map((s) => s.trim());
-          return {
-            email: parts[0] ?? '',
-            firstName: parts[1] ?? '',
-            tags: parts[2] ? [parts[2]] : [],
-          };
-        });
-      return api.importContacts({ consentSource, contacts: rows });
+        .map((line) => line.split(',').map((s) => s.trim()))
+        .filter((parts, idx) => !(idx === 0 && (parts[0] ?? '').toLowerCase() === 'email'))
+        .map((parts) => ({
+          email: parts[0] ?? '',
+          firstName: parts[1] ?? '',
+          tags: parts[2] ? parts[2].split(/[;|]/).map((t) => t.trim()).filter(Boolean) : [],
+        }));
+      if (rows.length === 0) {
+        throw new Error('Enter at least one valid contact line (email, firstName, tag)');
+      }
+      return api.importContacts({ consentSource: consentSource.trim(), contacts: rows });
     },
     onSuccess: async (res) => {
       await queryClient.invalidateQueries({ queryKey: ['contacts'] });
@@ -85,11 +90,32 @@ export function CampaignsView() {
     onError: (err) => toast.error(err instanceof Error ? err.message : 'Import failed'),
   });
 
+  const handleCsvUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : '';
+      if (text.trim()) {
+        setContactInput(text.trim());
+        toast.info(`Loaded ${file.name} — review and click Import Opted-In Contacts`);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const createCampaign = useMutation({
     mutationFn: () => {
-      const domainId = domainsQuery.data?.domains[0]?.id ?? 'default-domain';
+      const verifiedDomains = (domainsQuery.data?.domains ?? []).filter(
+        (d) => d.ownershipVerifiedAt && d.sendingEnabled && !d.isSuspended
+      );
+      const fallbackDomain = domainsQuery.data?.domains[0];
+      const domainId = selectedDomainId || verifiedDomains[0]?.id || fallbackDomain?.id || '';
+      if (!domainId) throw new Error('Register and verify a sending domain under Domains & DNS first');
       const templateId = selectedTplId || templatesQuery.data?.templates[0]?.id || '';
-      if (!templateId) throw new Error('Create a template first');
+      if (!templateId) throw new Error('Create a template in the Templates tab first');
+      if (campName.trim().length < 2) throw new Error('Campaign name must be at least 2 characters');
       return api.createCampaign({
         domainId,
         templateId,
@@ -110,10 +136,20 @@ export function CampaignsView() {
   const campaignAction = useMutation({
     mutationFn: (args: { id: string; action: 'pause' | 'resume' | 'cancel' }) =>
       api.transitionCampaign(args.id, args.action),
-    onSuccess: async () => {
+    onSuccess: async (res, vars) => {
       await queryClient.invalidateQueries({ queryKey: ['campaigns'] });
-      toast.success('Campaign updated');
+      if (vars.action === 'resume') {
+        const sent = (res as { dispatchedCount?: number }).dispatchedCount;
+        toast.success(
+          typeof sent === 'number'
+            ? `Campaign started — queued ${sent} email${sent === 1 ? '' : 's'}`
+            : 'Campaign started'
+        );
+      } else {
+        toast.success('Campaign updated');
+      }
     },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Campaign action failed'),
   });
 
   const addSuppression = useMutation({
@@ -123,6 +159,7 @@ export function CampaignsView() {
       await queryClient.invalidateQueries({ queryKey: ['suppressions'] });
       toast.success('Added to suppression list');
     },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Failed to add suppression'),
   });
 
   const removeSuppression = useMutation({
@@ -131,11 +168,13 @@ export function CampaignsView() {
       await queryClient.invalidateQueries({ queryKey: ['suppressions'] });
       toast.success('Removed suppression');
     },
+    onError: (err) => toast.error(err instanceof Error ? err.message : 'Failed to remove suppression'),
   });
 
   const templates = templatesQuery.data?.templates ?? [];
   const contacts = contactsQuery.data?.contacts ?? [];
   const campaigns = campaignsQuery.data?.campaigns ?? [];
+  const domains = domainsQuery.data?.domains ?? [];
   const suppressions = suppressionsQuery.data?.suppressions ?? [];
 
   return (
@@ -168,12 +207,19 @@ export function CampaignsView() {
         </AppTabs.List>
 
         <AppTabs.Panel value="campaigns" className="space-y-4">
-          <Card className="p-4">
+          <Card className="p-4 space-y-3">
+            {(templates.length === 0 || domains.length === 0) && (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                {domains.length === 0
+                  ? 'Step 1: Register and verify a sending domain under Domains & DNS.'
+                  : 'Step 1: Create at least one email template in the Templates tab before creating a campaign.'}
+              </div>
+            )}
             <form
-              className="grid gap-3 md:grid-cols-4"
+              className="grid gap-3 md:grid-cols-5"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (campName.trim().length >= 2) createCampaign.mutate();
+                createCampaign.mutate();
               }}
             >
               <Input
@@ -181,6 +227,21 @@ export function CampaignsView() {
                 value={campName}
                 onChange={(e) => setCampName(e.target.value)}
               />
+              <select
+                value={selectedDomainId || domains[0]?.id || ''}
+                onChange={(e) => setSelectedDomainId(e.target.value)}
+                className="h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 text-sm"
+              >
+                {domains.length === 0 ? (
+                  <option value="">No domains registered</option>
+                ) : (
+                  domains.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.domainName}{d.ownershipVerifiedAt ? '' : ' (unverified)'}
+                    </option>
+                  ))
+                )}
+              </select>
               <select
                 value={selectedTplId || templates[0]?.id || ''}
                 onChange={(e) => setSelectedTplId(e.target.value)}
@@ -201,7 +262,7 @@ export function CampaignsView() {
                 value={tagFilter}
                 onChange={(e) => setTagFilter(e.target.value)}
               />
-              <Button type="submit" disabled={createCampaign.isPending || templates.length === 0}>
+              <Button type="submit" disabled={createCampaign.isPending}>
                 <Send className="h-3.5 w-3.5" />
                 Create Campaign
               </Button>
@@ -353,14 +414,23 @@ export function CampaignsView() {
 
         <AppTabs.Panel value="contacts" className="grid gap-4 lg:grid-cols-2">
           <Card className="p-4 space-y-3">
-            <h3 className="text-sm font-semibold text-[var(--color-text)]">Consent-Gated Contact Import</h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-[var(--color-text)]">Consent-Gated Contact Import</h3>
+              <label className="cursor-pointer rounded-md border border-[var(--color-border)] bg-[var(--color-surface-muted)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text)] hover:opacity-90">
+                Upload CSV
+                <input type="file" accept=".csv,.txt" className="hidden" onChange={handleCsvUpload} />
+              </label>
+            </div>
+            <p className="text-[11px] text-[var(--color-text-muted)]">
+              One contact per line: <code className="font-mono">email, firstName, tag</code> (header row optional).
+            </p>
             <Input
               placeholder="Consent proof / source (required)"
               value={consentSource}
               onChange={(e) => setConsentSource(e.target.value)}
             />
             <textarea
-              rows={4}
+              rows={5}
               value={contactInput}
               onChange={(e) => setContactInput(e.target.value)}
               placeholder="email, firstName, tag (one per line)"

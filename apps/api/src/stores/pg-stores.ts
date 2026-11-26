@@ -1155,6 +1155,20 @@ export class PgMarketingStore implements MarketingStore {
     scheduledAt: string | null;
     tagFilter: string | null;
   }): Promise<CampaignRecord> {
+    const uuidRx = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRx.test(input.domainId)) {
+      throw new AppError(400, 'INVALID_DOMAIN', 'Select a valid registered sending domain');
+    }
+    if (!uuidRx.test(input.templateId)) {
+      throw new AppError(400, 'INVALID_TEMPLATE', 'Select a valid saved template');
+    }
+    const domCheck = await this.pool.query(
+      `SELECT 1 FROM domains WHERE organization_id = $1 AND id = $2 LIMIT 1`,
+      [input.organizationId, input.domainId]
+    );
+    if ((domCheck.rowCount ?? 0) === 0) {
+      throw new AppError(404, 'DOMAIN_NOT_FOUND', 'Selected domain does not belong to your organization');
+    }
     const tvRes = await this.pool.query(
       `SELECT tv.id::text
          FROM template_versions tv
@@ -1226,6 +1240,25 @@ export class PgMarketingStore implements MarketingStore {
         WHERE organization_id = $1 AND id = $2
        RETURNING id::text`,
       [orgId, id, status]
+    );
+    if ((res.rowCount ?? 0) === 0) return null;
+    const all = await this.listCampaigns(orgId);
+    return all.find((c) => c.id === id) ?? null;
+  }
+
+  async markCampaignDispatched(orgId: string, id: string, sentCount: number): Promise<CampaignRecord | null> {
+    const res = await this.pool.query(
+      `UPDATE campaigns
+          SET status = 'completed',
+              stats_cache = jsonb_set(
+                COALESCE(stats_cache, '{}'::jsonb),
+                '{sentCount}',
+                to_jsonb(COALESCE((stats_cache->>'sentCount')::int, 0) + $3)
+              ),
+              updated_at = NOW()
+        WHERE organization_id = $1 AND id = $2
+       RETURNING id::text`,
+      [orgId, id, sentCount]
     );
     if ((res.rowCount ?? 0) === 0) return null;
     const all = await this.listCampaigns(orgId);

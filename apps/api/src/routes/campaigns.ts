@@ -210,6 +210,14 @@ export class InMemoryMarketingStore {
     return c;
   }
 
+  markCampaignDispatched(orgId: string, id: string, sentCount: number): CampaignRecord | null {
+    const c = this.campaigns.get(id);
+    if (!c || c.organizationId !== orgId) return null;
+    c.sentCount += sentCount;
+    c.status = 'completed';
+    return c;
+  }
+
   listSuppressions(orgId: string): SuppressionRecord[] {
     return [...this.suppressions.values()].filter((s) => s.organizationId === orgId);
   }
@@ -355,11 +363,15 @@ export function createMarketingRouter(deps: {
             ? 'cancelled'
             : null;
     if (!nextStatus) throw new AppError(400, 'INVALID_ACTION', 'Unsupported campaign action');
-    const updated = await deps.store.transitionCampaign(req.auth!.orgId!, String(req.params.id ?? ''), nextStatus);
+    let updated = await deps.store.transitionCampaign(req.auth!.orgId!, String(req.params.id ?? ''), nextStatus);
     if (!updated) throw new AppError(404, 'NOT_FOUND', 'Campaign not found');
     let dispatchedCount = 0;
     if (nextStatus === 'running' && deps.onCampaignStarted) {
       dispatchedCount = await deps.onCampaignStarted(updated);
+      if (deps.store.markCampaignDispatched) {
+        const completed = await deps.store.markCampaignDispatched(req.auth!.orgId!, updated.id, dispatchedCount);
+        if (completed) updated = completed;
+      }
     }
     res.json({ campaign: updated, dispatchedCount });
   });
