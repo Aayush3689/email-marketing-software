@@ -104,6 +104,7 @@ services:
       - ../../.env
     volumes:
       - ../../certs:/etc/mail-certs
+      - ${LETSENCRYPT_HOST_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
     command:
       - /bin/sh
       - -c
@@ -111,14 +112,34 @@ services:
         set -eu
         apk add --no-cache openssl >/dev/null
         mkdir -p /etc/mail-certs
-        if [ ! -s /etc/mail-certs/fullchain.pem ] || [ ! -s /etc/mail-certs/privkey.pem ]; then
+        DOMAIN="$${TLS_DOMAIN:-$${SMTP_SERVER_DOMAIN:-mx1.fastconnect.in}}"
+        LE_DIR="/etc/letsencrypt/live/$${DOMAIN}"
+        if [ -s "$${LE_DIR}/fullchain.pem" ] && [ -s "$${LE_DIR}/privkey.pem" ] && openssl x509 -in "$${LE_DIR}/fullchain.pem" -noout 2>/dev/null; then
+          if ! cmp -s "$${LE_DIR}/fullchain.pem" /etc/mail-certs/fullchain.pem || ! cmp -s "$${LE_DIR}/privkey.pem" /etc/mail-certs/privkey.pem; then
+            cp -L "$${LE_DIR}/fullchain.pem" /etc/mail-certs/.fullchain.tmp
+            cp -L "$${LE_DIR}/privkey.pem" /etc/mail-certs/.privkey.tmp
+            mv /etc/mail-certs/.fullchain.tmp /etc/mail-certs/fullchain.pem
+            mv /etc/mail-certs/.privkey.tmp /etc/mail-certs/privkey.pem
+            echo "Synced dereferenced Let's Encrypt certificate for $${DOMAIN} into /etc/mail-certs"
+          else
+            echo "Existing /etc/mail-certs matches Let's Encrypt certificate for $${DOMAIN}"
+          fi
+        elif [ -s /etc/mail-certs/fullchain.pem ] && [ -s /etc/mail-certs/privkey.pem ]; then
+          echo "Preserving existing certificates already present in /etc/mail-certs"
+        else
           openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
-            -subj "/CN=$${SMTP_SERVER_DOMAIN:-mx1.localhost}" \
-            -keyout /etc/mail-certs/privkey.pem \
-            -out /etc/mail-certs/fullchain.pem
-          chmod 644 /etc/mail-certs/fullchain.pem /etc/mail-certs/privkey.pem
-          echo "Generated bootstrap self-signed TLS certificate in /etc/mail-certs"
+            -subj "/CN=$${DOMAIN}" \
+            -addext "subjectAltName=DNS:$${DOMAIN}" \
+            -keyout /etc/mail-certs/.privkey.tmp \
+            -out /etc/mail-certs/.fullchain.tmp
+          mv /etc/mail-certs/.fullchain.tmp /etc/mail-certs/fullchain.pem
+          mv /etc/mail-certs/.privkey.tmp /etc/mail-certs/privkey.pem
+          echo "Generated bootstrap self-signed TLS certificate for $${DOMAIN} in /etc/mail-certs"
         fi
+        chown 1000:1000 /etc/mail-certs /etc/mail-certs/fullchain.pem /etc/mail-certs/privkey.pem
+        chmod 750 /etc/mail-certs
+        chmod 644 /etc/mail-certs/fullchain.pem
+        chmod 640 /etc/mail-certs/privkey.pem
     networks:
       - mailplat-internal
 
@@ -234,6 +255,9 @@ services:
     restart: unless-stopped
     env_file:
       - ../../.env
+    environment:
+      TLS_CERT_PATH: ${TLS_CERT_PATH:-/etc/mail-certs/fullchain.pem}
+      TLS_KEY_PATH: ${TLS_KEY_PATH:-/etc/mail-certs/privkey.pem}
     ports:
       - "25:25"
       - "587:587"

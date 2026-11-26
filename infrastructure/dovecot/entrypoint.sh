@@ -16,8 +16,8 @@ chmod 600 /etc/dovecot/dovecot-sql.conf.ext
 
 mkdir -p /etc/dovecot/tls
 if [ -s "${TLS_CERT_PATH:-/etc/mail-certs/fullchain.pem}" ] && [ -s "${TLS_KEY_PATH:-/etc/mail-certs/privkey.pem}" ]; then
-  cp "${TLS_CERT_PATH:-/etc/mail-certs/fullchain.pem}" /etc/dovecot/tls/fullchain.pem
-  cp "${TLS_KEY_PATH:-/etc/mail-certs/privkey.pem}" /etc/dovecot/tls/privkey.pem
+  cp -L "${TLS_CERT_PATH:-/etc/mail-certs/fullchain.pem}" /etc/dovecot/tls/fullchain.pem
+  cp -L "${TLS_KEY_PATH:-/etc/mail-certs/privkey.pem}" /etc/dovecot/tls/privkey.pem
 elif [ ! -s /etc/dovecot/tls/fullchain.pem ]; then
   openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
     -subj "/CN=${PRIMARY_DOMAIN:-mail.localhost}" \
